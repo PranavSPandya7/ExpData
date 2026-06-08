@@ -68,7 +68,7 @@ def flag_bad_gps_points(df, phase):
 BASE          = Path(r'C:\Users\pandya\Documents\Github\docker\ExpData')
 RAW_DATA_ROOT = Path(r'C:\Users\pandya\Documents\Github\docker\rawdata')
 OUTPUTS = Path(r'C:\Users\pandya\Documents\Github\docker\ExpData\outputs')
-KEY_FILE      = BASE / 'metadata\key.csv'
+KEY_FILE      = BASE / 'metadata' / 'key.csv'
 INDEX_FILE    = OUTPUTS / '00_index_10sec.csv'
 
 # ── SKIP-GATE CONFIG ─────────────────────────────────────────────────────────

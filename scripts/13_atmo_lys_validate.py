@@ -4,7 +4,7 @@
 Generates quality HTML report for Atmotube + LYS data with auto-scaled y-axis.
 
 Reads:  outputs/03_atmo_lys_merged.csv (via _paths.py)
-Output: outputs/03_atmo_lys_quality_report_v2.html
+Output: outputs/13_atmo_lys_quality_report.html
 """
 import warnings; warnings.filterwarnings('ignore')
 import base64, io

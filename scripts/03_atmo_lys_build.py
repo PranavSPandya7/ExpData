@@ -10,7 +10,7 @@ BASE     = Path(r'C:\Users\pandya\Documents\Github\docker\ExpData')
 CPW      = Path(r'C:\Users\pandya\OneDrive - UCL\Field experiment raw data\Complete Participantwise data\Atmo_lys')
 RAW_DIR  = Path(r'C:\Users\pandya\Documents\Github\docker\rawdata\03_atmo_lys')
 OUTPUTS  = BASE / 'outputs'
-KEY_FILE = BASE / 'metadata\key.csv'
+KEY_FILE = BASE / 'metadata' / 'key.csv'
 INDEX_FILE = OUTPUTS / '00_index_10sec.csv'
 UTC_OFFSET = pd.Timedelta(hours=2)
 
@@ -195,6 +195,36 @@ def main():
     print(f'Participants: {sorted(out["ParticipantID"].unique())}')
     print(f'Phases:       {sorted(out["PhaseID"].dropna().unique())}')
     print(f'Columns ({len(out.columns)}): {out.columns.tolist()}')
+
+    # ── POST-PROCESS: clean out_path ──
+    clean_atmo_lys(out_path)
+
+
+def clean_atmo_lys(path: Path):
+    """Read CSV, clip negatives, fill all NaN, save in-place."""
+    print(f'  Cleaning {path.name} ...')
+    df = pd.read_csv(path)
+    # Clip negatives to 0
+    numeric_cols = df.select_dtypes(include=['int','float']).columns
+    for c in numeric_cols:
+        df[c] = pd.to_numeric(df[c], errors='coerce').clip(lower=0)
+    # Normalise PhaseID
+    df['PhaseID'] = df['PhaseID'].fillna('').astype(str).replace({'nan':'','None':''})
+    # Fill remaining NaN within each (ParticipantID, minute) group
+    sig = [c for c in df.columns if c not in ('ParticipantID','PhaseID','Datetime','Date','key_0')]
+    df['_minute'] = pd.to_datetime(df['Datetime']).dt.floor('1min')
+    for _, grp in df.groupby(['ParticipantID','_minute']):
+        df.loc[grp.index, sig] = grp[sig].ffill().bfill()
+    df = df.drop(columns=['_minute'])
+    df[sig] = df[sig].bfill().ffill()  # catch any remaining
+    df.to_csv(path, index=False)
+    nan_left = df.isna().sum().sum()
+    neg_left = (df[numeric_cols] < 0).sum().sum()
+    print(f'  Cleaned: NaN={nan_left}, Negatives={neg_left}')
+    if nan_left == 0 and neg_left == 0:
+        print('  ✅ Zero blanks, zero negatives')
+    else:
+        print(f'  ⚠️  Remaining: NaN={nan_left}, Neg={neg_left}')
 
 
 if __name__ == '__main__':

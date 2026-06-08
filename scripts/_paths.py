@@ -16,7 +16,3 @@ ATMO_LYS_DIR  = CPW_ROOT / "Atmo_lys"            # Atmotube + LYS CSVs
 NEON_ROOT_DIR = CPW_ROOT / "Eyetracker raw files"  # Neon Player exports
 QUEST_SOURCE  = CPW_ROOT / "Questionnaire"        # Questionnaire source CSVs
 
-# ── External processed data (used by validate scripts) ───────────────────────
-DP_ROOT      = Path(r"C:\Users\pandya\OneDrive - UCL\Pranav PhD\Paper 3\Data Processing_05May")
-DP_V2_CSV    = DP_ROOT / "outputs" / "empatica_corrected_10sec_v2.csv"  # Empatica v2 CSV
-DP_KEY_FULL  = DP_ROOT / "key_full.csv"                                   # Full participant key

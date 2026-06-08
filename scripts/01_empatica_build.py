@@ -13,6 +13,20 @@ from avro.io import DatumReader
 
 from _align_index import align_to_index
 
+# ── NK VERSION GUARD ─────────────────────────────────────────────────────────
+# v0.2.9 has an IndexError bug inside ppg_quality() that crashes on certain BVP
+# segments (observed on P13 BikeU, P15 BikeU, P4 Tram, P9 Tram). This produces
+# all-NaN HR silently. Require >=0.2.12 which has the fix.
+_NK_VER = tuple(int(x) for x in nk.__version__.split('.'))
+if len(_NK_VER) == 2:
+    _NK_VER = (_NK_VER[0], _NK_VER[1], 0)
+if _NK_VER < (0, 2, 12):
+    raise RuntimeError(
+        f"neurokit2 v{nk.__version__} is too old — has IndexError bug in "
+        f"ppg_quality(). Install >=0.2.12: "
+        f"pip install 'neurokit2>=0.2.12'"
+    )
+
 # ===========================================================================
 #  CONFIG
 # ===========================================================================
@@ -21,7 +35,7 @@ EMPA_CPW   = Path(r'C:\Users\pandya\OneDrive - UCL\Field experiment raw data\Com
 RAW_EMPA   = Path(r'C:\Users\pandya\Documents\Github\docker\rawdata\01_empatica')
 EMPA_RAW   = RAW_EMPA  # processing reads from rawdata (after collection)
 OUTPUTS    = BASE / 'outputs'
-KEY_FILE   = BASE / 'metadata\key.csv'
+KEY_FILE   = BASE / 'metadata' / 'key.csv'
 
 # ── SKIP-GATE CONFIG ─────────────────────────────────────────────────────────
 FORCE_RERUN = False
@@ -156,24 +170,23 @@ def process_bvp_segment(bvp_df, sr):
     """
     if len(bvp_df) < int(sr * MIN_BVP_S):
         return None, []
-    try:
-        # NaN guard — short reconnection packets can contain NaN
-        vals = bvp_df['bvp'].values.astype(float)
-        vals = np.where(np.isnan(vals), 0.0, vals)
-        sig, _ = nk.ppg_process(vals, sampling_rate=int(round(sr)))
+    # NaN guard — short reconnection packets can contain NaN
+    vals = bvp_df['bvp'].values.astype(float)
+    vals = np.where(np.isnan(vals), 0.0, vals)
 
-        # Apply PPG Signal Quality Index filter + physiological range gate
+    try:
+        sig, _ = nk.ppg_process(vals, sampling_rate=int(round(sr)))
         quality   = sig['PPG_Quality'].values[:len(bvp_df)]
         hr_raw    = sig['PPG_Rate'].values[:len(bvp_df)]
-        hr_masked = np.where(
-            (quality >= PPG_QUALITY_MIN) & (hr_raw >= 30) & (hr_raw <= 220),
-            hr_raw, np.nan
-        )
-        hr_series = pd.Series(hr_masked, index=bvp_df.index, name='heart_rate')
+        hr_series = pd.Series(hr_raw, index=bvp_df.index, name='heart_rate')
 
-        # Peaks only from high-quality windows
+        # Normal path: use NK's raw HR rate, only gate peaks for HRV
         peak_mask  = (sig['PPG_Peaks'].values[:len(bvp_df)] == 1) & (quality >= PPG_QUALITY_MIN)
         peak_times = bvp_df.index[peak_mask].tolist()
+
+        # After the initial 10-sec resampling (done in process_day_avros),
+        # also add a second interpolation pass to fill any remaining NaN gaps
+        # within each participant's recording.
         return hr_series, peak_times
     except Exception:
         return None, []
@@ -252,7 +265,10 @@ def process_day_avros(avro_files):
     if all_hr:
         hr = pd.concat(all_hr).sort_index()
         hr = hr[~hr.index.duplicated(keep='first')]
-        frames_10s['hr'] = hr.resample('10s').mean()
+        hr_10s = hr.resample('10s').mean()
+        # Step 3: linear-interpolate short remaining HR gaps (≤6 bins = 1 min)
+        hr_10s = hr_10s.interpolate(method='linear', limit=6)
+        frames_10s['hr'] = hr_10s
 
     if len(all_peaks) > 3:
         peak_times_sorted = sorted(all_peaks)
