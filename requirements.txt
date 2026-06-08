@@ -1,0 +1,11 @@
+# ── Required for the full pipeline (00-07) ────────────────────────────────────
+pandas>=2.0
+numpy>=1.24
+matplotlib>=3.7
+neurokit2>=0.2
+avro>=1.11
+scipy>=1.10
+
+# ── Optional: used by code_files/ scripts (e.g. UCM photo validation) ────────
+# folium>=0.14
+# Pillow>=10.0
