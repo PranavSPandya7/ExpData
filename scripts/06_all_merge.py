@@ -1,15 +1,65 @@
-"""Merge all index-aligned sensor + questionnaire CSVs (from outputs/) into one wide file."""
+"""Merge all index-aligned sensor + questionnaire CSVs (from outputs/) into one wide file.
+Also saves a copy with % completion along each phase path."""
+
 import warnings; warnings.filterwarnings('ignore')
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pandas as pd
+import numpy as np
+import geopandas as gpd
+from shapely.geometry import Point
+from shapely import line_locate_point, force_2d
 from _paths import OUTPUTS
+
 OUT = OUTPUTS
 INDEX_FILE = OUT / '00_index_10sec.csv'
 OUT_FILE = OUT / 'mergeddata_all.csv'
+OUT_FILE_PCT = OUT / 'mergeddata_all_%complete.csv'
 MERGE_KEYS = ['ParticipantID', 'PhaseID', 'Datetime']
 PHASES_5 = {'BikeU', 'WalkU', 'BikeG', 'WalkG', 'Tram'}
+GPKG_DIR = Path(__file__).resolve().parent / 'Experiment path'
+PHASE_GPKG = {p: f'{p}.gpkg' for p in PHASES_5}
+
+def add_pct_complete(df):
+    """Add pct_complete column: for each phase with a GPKG path file,
+    project GPS points onto the path line and compute % distance along it."""
+    df['pct_complete'] = np.nan
+
+    for phase, gpkg_file in PHASE_GPKG.items():
+        gpkg_path = GPKG_DIR / gpkg_file
+        if not gpkg_path.exists():
+            print(f'  [pct_complete] GPKG not found for {phase}, skipping.')
+            continue
+
+        mask = df['PhaseID'] == phase
+        n_rows = mask.sum()
+        if n_rows == 0:
+            continue
+
+        path_gdf = gpd.read_file(gpkg_path)
+        line = force_2d(path_gdf.geometry.iloc[0])
+        line_length = line.length
+
+        pct_vals = []
+        for idx in df.index[mask]:
+            lat = df.at[idx, 'GPS_lat']
+            lon = df.at[idx, 'GPS_lon']
+            if pd.isna(lat) or pd.isna(lon):
+                pct_vals.append(np.nan)
+                continue
+            pt = Point(lon, lat)
+            dist_along = line_locate_point(line, pt)
+            pct_vals.append(round((dist_along / line_length) * 100, 1))
+
+        df.loc[mask, 'pct_complete'] = pct_vals
+        valid = [v for v in pct_vals if not np.isnan(v)]
+        rng = f'{min(valid):.1f}% → {max(valid):.1f}%' if valid else 'N/A'
+        skipped = sum(1 for v in pct_vals if np.isnan(v))
+        print(f'  [pct_complete] {phase}: {n_rows} rows, {rng} (skipped {skipped} NaN GPS)')
+
+    return df
+
 
 def main():
     if not INDEX_FILE.exists():
@@ -30,7 +80,7 @@ def main():
     
     for f in sorted(OUT.glob('*.csv'), key=_script_order):
         name = f.stem
-        if name in ('index_10sec', 'mergeddata_all'):
+        if name in ('index_10sec', 'mergeddata_all', 'mergeddata_all_%complete'):
             continue
         df = pd.read_csv(f, low_memory=False)
         if 'Datetime' not in df.columns and 'questionnaires' in name:
@@ -52,6 +102,10 @@ def main():
             print(f'  {name}: {len(df):,} rows -> {sensor_cols} cols')
 
     merged = merged.sort_values(MERGE_KEYS).reset_index(drop=True)
+
+    # Add % completion column
+    merged = add_pct_complete(merged)
+
     merged.to_csv(OUT_FILE, index=False)
     print(f'\nSaved: {OUT_FILE} — {len(merged):,} rows x {merged.shape[1]} cols')
     print(f'  Participants: {sorted(merged["ParticipantID"].unique())}')
