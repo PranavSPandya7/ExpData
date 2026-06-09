@@ -31,6 +31,7 @@ Creates the 10-second continuous time grid that all sensor data aligns to. Reads
 
 **Validation:** `12_ucm_validate.py` generates an interactive Folium map with GPS tracks and photo bookend markers. `12_ucm_validate_v2.py` adds per-phase environmental signal quality plots.
 
+
 ---
 
 ## 03 — Atmotube + LYS (`03_atmo_lys_build.py`)

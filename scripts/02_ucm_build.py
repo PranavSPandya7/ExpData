@@ -23,7 +23,6 @@ def flag_bad_gps_points(df, phase):
     Exclusion criteria:
     1. HDOP > 5              — poor satellite geometry
     2. IO_flag == 9          — receiver reports no fix
-    3. Step distance > 50 m in <2 s  — coordinate anomaly
     """
     n = len(df)
     bad = np.zeros(n, dtype=bool)
@@ -47,20 +46,6 @@ def flag_bad_gps_points(df, phase):
     lon = df["GPS_lon"].values.astype(float)
     time_v = df["Datetime"].values
     valid_coord = ~np.isnan(lat) & ~np.isnan(lon)
-
-    # ── 3. Large jump anomaly (>50 m in <2 s) ──────────────────────────
-    step_m = np.full(n, np.nan)
-    for i in range(1, n):
-        if valid_coord[i - 1] and valid_coord[i] and pd.notna(time_v[i - 1]) and pd.notna(time_v[i]):
-            dt = (time_v[i] - time_v[i - 1]) / np.timedelta64(1, "s")
-            if dt > 0 and dt < 2:
-                step_m[i] = haversine_m(lat[i - 1], lon[i - 1], lat[i], lon[i])
-
-    jump_bad = step_m > 50
-    bad |= jump_bad
-
-    # Propagate bad one row forward (step INTO bad point is unreliable)
-    bad[1:] |= bad[:-1].copy()
 
     return bad
 
