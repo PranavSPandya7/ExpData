@@ -1,231 +1,342 @@
-"""Atmo+LYS: read LYS + Atmotube CSVs, merge 4 sensors, resample 1-min to 10-sec, align to index."""
+"""Atmo/LYS build: merge four sensors and align minute readings to the 10-sec index."""
 
-import warnings; warnings.filterwarnings('ignore')
-from pathlib import Path
-import pandas as pd
+import warnings; warnings.filterwarnings("ignore")
 from datetime import datetime
-import shutil
+from pathlib import Path
+import sys
 
-BASE     = Path(r'C:\Users\pandya\Documents\Github\docker\ExpData')
-CPW      = Path(r'C:\Users\pandya\OneDrive - UCL\Field experiment raw data\Complete Participantwise data\Atmo_lys')
-RAW_DIR  = Path(r'C:\Users\pandya\Documents\Github\docker\rawdata\03_atmo_lys')
-OUTPUTS  = BASE / 'outputs'
-KEY_FILE = BASE / 'metadata' / 'key.csv'
-INDEX_FILE = OUTPUTS / '00_index_10sec.csv'
+import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _paths import (
+    KEY_FILE,
+    OUTPUTS,
+    RAW_ATMO_DIR,
+    assert_sensor_folder_clean,
+    load_key_unique,
+)
+
+RAW_DIR = RAW_ATMO_DIR
+INDEX_FILE = OUTPUTS / "00_index_10sec.csv"
 UTC_OFFSET = pd.Timedelta(hours=2)
+FORCE_RERUN = True
 
-# ── SKIP-GATE CONFIG ─────────────────────────────────────────────────────────
-FORCE_RERUN = False
-
-PHASES = ['BikeU', 'WalkU', 'BikeG', 'WalkG', 'Tram']
-
-# Sensor config: (sensor_id, file_suffix, output_prefix)
+PHASES = ["BikeU", "WalkU", "BikeG", "WalkG", "Tram"]
 SENSORS = [
-    ('LYS1', 'LYS1', 'LYS1'),
-    ('LYS2', 'LYS2', 'LYS2'),
-    ('atmo_left', 'Atmo_left', 'atmotube_left'),
-    ('atmo_right', 'Atmo_right', 'atmotube_right'),
+    ("LYS1", "LYS1", "LYS1"),
+    ("LYS2", "LYS2", "LYS2"),
+    ("atmo_left", "Atmo_left", "atmotube_left"),
+    ("atmo_right", "Atmo_right", "atmotube_right"),
 ]
 
-
-# ── HELPERS ──────────────────────────────────────────────────────────────────
 def parse_key_date(d: str) -> str:
-    return datetime.strptime(f'{d}-2025', '%d-%b-%Y').strftime('%Y-%m-%d')
+    return datetime.strptime(f"{d}-2025", "%d-%b-%Y").strftime("%Y-%m-%d")
 
 
 def build_phase_windows(key: pd.DataFrame) -> dict:
-    """Returns {(pid_int, phase_key): (start_ts, end_ts)} in Brussels local time."""
+    """Return {(pid, phase): (start_ts, end_ts)} in Brussels local time."""
     windows = {}
     for _, row in key.iterrows():
-        if pd.isna(row['Participant_ID']):
+        if pd.isna(row["Participant_ID"]):
             continue
-        pid  = int(row['Participant_ID'])
-        date = parse_key_date(str(row['Date']))
+        pid = int(row["Participant_ID"])
+        date = parse_key_date(str(row["Date"]))
         for ph in PHASES:
-            s_col = f'{ph}_start'
-            e_col = f'{ph}_end'
+            s_col = f"{ph}_start"
+            e_col = f"{ph}_end"
             if s_col not in row or pd.isna(row[s_col]) or pd.isna(row[e_col]):
                 continue
             start = pd.Timestamp(f"{date} {row[s_col]}") + UTC_OFFSET
-            end   = pd.Timestamp(f"{date} {row[e_col]}") + UTC_OFFSET
+            end = pd.Timestamp(f"{date} {row[e_col]}") + UTC_OFFSET
             if end < start:
                 end += pd.Timedelta(days=1)
             windows[(pid, ph)] = (start, end)
     return windows
 
 
+def maybe_fix_swapped_month_day(df: pd.DataFrame, pid: int, windows: dict) -> pd.Series:
+    """Fix files whose stored ISO dates have day/month swapped against the key date."""
+    parsed = pd.to_datetime(df["Datetime"], errors="coerce")
+    if parsed.dropna().empty:
+        return parsed
+
+    expected_dates = {
+        start.normalize().date()
+        for (win_pid, _), (start, _) in windows.items()
+        if win_pid == pid
+    }
+    observed_dates = {ts.date() for ts in parsed.dropna()}
+    if observed_dates & expected_dates:
+        return parsed
+
+    swapped_strings = parsed.dropna().dt.strftime("%Y-%d-%m %H:%M:%S")
+    swapped = parsed.copy()
+    swapped.loc[parsed.notna()] = pd.to_datetime(swapped_strings, errors="coerce")
+    swapped_dates = {ts.date() for ts in swapped.dropna()}
+    if swapped_dates & expected_dates:
+        print(f"    corrected swapped month/day dates for P{pid}")
+        return swapped
+
+    return parsed
+
+
+def normalize_legacy_sensor_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize older P1-style Atmotube/LYS CSV headers to the staged schema."""
+    df = df.copy()
+    if "Datetime" not in df.columns:
+        if "timestamp" in df.columns:
+            # Some processed P1 LYS timestamps include a misleading timezone suffix;
+            # keep the recorded wall-clock time so it aligns with the shifted key.
+            ts = df["timestamp"].astype(str).str.replace(r"([+-]\d{2}:\d{2})$", "", regex=True)
+            df["Datetime"] = pd.to_datetime(ts, errors="coerce")
+        elif "Date" in df.columns and "Time" in df.columns:
+            df["Datetime"] = pd.to_datetime(
+                df["Date"].astype(str) + " " + df["Time"].astype(str),
+                dayfirst=True,
+                errors="coerce",
+            )
+        elif "Date" in df.columns:
+            df["Datetime"] = pd.to_datetime(df["Date"], errors="coerce")
+
+    rename = {}
+    for col in df.columns:
+        clean = col.lower().replace("Â", "").replace("Ë", "").replace("š", "").strip()
+        if clean.startswith("pm1,"):
+            rename[col] = "atmotube_pm1"
+        elif clean.startswith("pm2.5,"):
+            rename[col] = "atmotube_pm2.5"
+        elif clean.startswith("pm10,"):
+            rename[col] = "atmotube_pm10"
+        elif clean.startswith("temperature"):
+            rename[col] = "atmotube_temperature"
+        elif clean.startswith("humidity"):
+            rename[col] = "atmotube_humidity"
+        elif clean == "lux":
+            rename[col] = "lys_lux"
+        elif clean == "kelvin":
+            rename[col] = "lys_kelvin"
+        elif clean == "rgbr":
+            rename[col] = "lys_rgbr"
+        elif clean == "rgbg":
+            rename[col] = "lys_rgbg"
+        elif clean == "rgbb":
+            rename[col] = "lys_rgbb"
+        elif clean == "rgbir":
+            rename[col] = "lys_rgbir"
+        elif clean == "movement":
+            rename[col] = "lys_movement"
+        elif clean == "medi":
+            rename[col] = "lys_medi"
+        elif clean == "r'":
+            rename[col] = "lys_r'"
+        elif clean == "g'":
+            rename[col] = "lys_g'"
+        elif clean == "b'":
+            rename[col] = "lys_b'"
+    if rename:
+        df = df.rename(columns=rename)
+    return df
+
+
 def load_sensor_file(pid: int, suffix: str, prefix: str, windows: dict) -> pd.DataFrame:
-    """Load one sensor file, keep ALL data, label PhaseID where applicable."""
-    fp = RAW_DIR / f'{pid}_{suffix}.csv'
+    """Load one staged sensor CSV and align it to 10-second bins."""
+    fp = RAW_DIR / f"{pid}_{suffix}.csv"
     if not fp.exists():
-        print(f'    SKIP {suffix}: file not found')
+        print(f"    SKIP {suffix}: file not found")
         return pd.DataFrame()
 
-    df = pd.read_csv(fp)
-    if df.empty or 'Datetime' not in df.columns:
-        print(f'    SKIP {suffix}: empty or no Datetime column')
+    df = normalize_legacy_sensor_columns(pd.read_csv(fp))
+    if df.empty or "Datetime" not in df.columns:
+        print(f"    SKIP {suffix}: empty or no Datetime column")
         return pd.DataFrame()
 
-    df['Datetime'] = pd.to_datetime(df['Datetime'], errors='coerce')
-    df = df.dropna(subset=['Datetime'])
+    df["Datetime"] = maybe_fix_swapped_month_day(df, pid, windows)
+    df = df.dropna(subset=["Datetime"])
+    if df.empty:
+        print(f"    SKIP {suffix}: no parseable timestamps")
+        return pd.DataFrame()
 
-    # Assign PhaseID for rows within phase windows (keep rest as NaN)
-    df['PhaseID'] = None
+    df["PhaseID"] = "reststop"
     for ph in PHASES:
         if (pid, ph) not in windows:
             continue
         start, end = windows[(pid, ph)]
-        mask = (df['Datetime'] >= start) & (df['Datetime'] <= end)
-        df.loc[mask, 'PhaseID'] = ph
+        mask = (df["Datetime"] >= start) & (df["Datetime"] <= end)
+        df.loc[mask, "PhaseID"] = ph
 
-    # Rename measurement columns with prefix
-    meas_cols = [c for c in df.columns if c not in ('ParticipantID', 'Datetime', 'PhaseID')]
-    rename = {c: f'{prefix}__{c}' for c in meas_cols}
+    meas_cols = [
+        c for c in df.columns
+        if c not in ("ParticipantID", "Datetime", "PhaseID", "Date", "Time", "timestamp", "sensor")
+        and c not in ("VOC, ppm", "AQS", "Pressure, mbar", "Latitude", "Longitude")
+    ]
+    rename = {c: f"{prefix}__{c}" for c in meas_cols}
     df = df.rename(columns=rename)
 
-    # Floor to 10-sec bins and average (numeric cols only)
-    df = df.set_index('Datetime').sort_index()
+    df = df.set_index("Datetime").sort_index()
     prefixed_cols = [rename[c] for c in meas_cols]
-    numeric_cols = [c for c in prefixed_cols if c in df.columns and df[c].dtype.kind in ('i','f')]
+    numeric_cols = [c for c in prefixed_cols if c in df.columns and df[c].dtype.kind in ("i", "f")]
     if not numeric_cols:
+        print(f"    SKIP {suffix}: no numeric signal columns")
         return pd.DataFrame()
-    # Resample 1-minute data to 10-sec: forward-fill each value 6 times
-    # (limit=5 prevents filling across large gaps. Since raw data is 1-min,
-    # this copies each value into the 5 intervening 10-sec bins.)
-    resampled = df[numeric_cols].resample('10s').ffill(limit=5)
-    if 'PhaseID' in df.columns:
-        resampled['PhaseID'] = df['PhaseID'].resample('10s').first()
-    resampled = resampled.reset_index()
-    resampled['Datetime'] = resampled['Datetime'].dt.floor('10s')
-    resampled.insert(0, 'ParticipantID', f'P{pid}')
 
-    phase_count = resampled['PhaseID'].notna().sum()
-    print(f'    {suffix}: {len(resampled)} rows at 10-sec ({phase_count} in phase windows)')
+    minute_key = df.index.floor("min")
+    minute_values = df[numeric_cols].groupby(minute_key).median()
+    minute_phase = df["PhaseID"].groupby(minute_key).agg(
+        lambda s: s.mode().iloc[0] if not s.mode().empty else s.iloc[0]
+    )
+    expanded_values = []
+    expanded_phases = []
+    for offset_s in range(0, 60, 10):
+        offset = pd.Timedelta(seconds=offset_s)
+        value_block = minute_values.copy()
+        value_block.index = value_block.index + offset
+        phase_block = minute_phase.copy()
+        phase_block.index = phase_block.index + offset
+        expanded_values.append(value_block)
+        expanded_phases.append(phase_block)
+    resampled = pd.concat(expanded_values).sort_index()
+    resampled["PhaseID"] = pd.concat(expanded_phases).sort_index().reindex(resampled.index).fillna("reststop")
+    resampled.index.name = "Datetime"
+    resampled = resampled.reset_index()
+    resampled["Datetime"] = resampled["Datetime"].dt.floor("10s")
+    resampled.insert(0, "ParticipantID", f"P{pid}")
+
+    phase_count = resampled["PhaseID"].notna().sum()
+    print(f"    {suffix}: {len(resampled)} rows at 10-sec ({phase_count} in phase windows)")
     return resampled
 
 
-# ── MAIN ─────────────────────────────────────────────────────────────────────
-def main():
-    out_path = OUTPUTS / '03_atmo_lys_merged.csv'
+def clean_atmo_lys(path: Path) -> None:
+    print(f"  Cleaning {path.name} ...")
+    df = pd.read_csv(path)
+    numeric_cols = [
+        col
+        for col in df.columns
+        if col not in ("ParticipantID", "PhaseID", "Datetime", "Date")
+        and not col.startswith("QC__")
+    ]
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    neg_before = int((df[numeric_cols] < 0).sum().sum()) if numeric_cols else 0
+    if numeric_cols:
+        df[numeric_cols] = df[numeric_cols].mask(df[numeric_cols] < 0)
+    kelvin_cols = [col for col in numeric_cols if col.endswith("__lys_kelvin")]
+    kelvin_bad = 0
+    for col in kelvin_cols:
+        bad = df[col].notna() & ((df[col] < 1000) | (df[col] > 12000))
+        kelvin_bad += int(bad.sum())
+        df.loc[bad, col] = pd.NA
+    df.to_csv(path, index=False)
+    nan_left = int(df.isna().sum().sum())
+    neg_left = int((df[numeric_cols] < 0).sum().sum()) if numeric_cols else 0
+    print(
+        f"  Cleaned: set {neg_before} negative sensor values and {kelvin_bad} out-of-range Kelvin values to NaN; "
+        f"NaN={nan_left}, Negatives={neg_left}"
+    )
+
+
+def derive_lys_categories(path: Path) -> None:
+    print(f"  Deriving LYS categories from {path.name} ...")
+    df = pd.read_csv(path)
+    added = []
+    for sensor in ("LYS1", "LYS2"):
+        lux_col = f"{sensor}__lys_lux"
+        out_col = f"{sensor}__lux_cat"
+        if lux_col not in df.columns:
+            continue
+        lux = pd.to_numeric(df[lux_col], errors="coerce")
+        df[out_col] = pd.cut(
+            lux,
+            bins=[-float("inf"), 1000, 10000, float("inf")],
+            labels=["Shaded", "Daylight", "Bright daylight"],
+        )
+        added.append(out_col)
+    df.to_csv(path, index=False)
+    if added:
+        print(f"  Added {len(added)} columns: {added}")
+
+
+def main() -> None:
+    out_path = OUTPUTS / "03_atmo_lys_merged.csv"
     if out_path.exists() and not FORCE_RERUN:
-        print(f'Output file already exists: {out_path}. Skipping Atmo & LYS build (FORCE_RERUN=False).')
+        print(f"Output file already exists: {out_path}. Skipping Atmo & LYS build (FORCE_RERUN=False).")
         return
 
     if not KEY_FILE.exists():
-        print(f'ERROR: Key file not found: {KEY_FILE}')
+        print(f"ERROR: Key file not found: {KEY_FILE}")
         return
 
-    key     = pd.read_csv(KEY_FILE)
+    assert_sensor_folder_clean("atmo_lys", RAW_DIR)
+
+    key = load_key_unique(KEY_FILE)
     windows = build_phase_windows(key)
-    pids    = sorted(key['Participant_ID'].dropna().astype(int).tolist())
+    pids = sorted(key["Participant_ID"].dropna().astype(int).unique().tolist())
 
-    # ── Collect: CPW → rawdata/atmo_lys/ ──
-    RAW_DIR.mkdir(parents=True, exist_ok=True)
-    existing = list(RAW_DIR.glob('*.csv'))
+    existing = list(RAW_DIR.glob("*.csv"))
     if not existing:
-        count = 0
-        for _, suffix, _ in SENSORS:
-            for f in CPW.glob(f'*_{suffix}.csv'):
-                shutil.copy2(f, RAW_DIR / f.name)
-                count += 1
-        print(f'  Collected {count} files -> {RAW_DIR}')
-    else:
-        print(f'  Already collected ({len(existing)} files in {RAW_DIR})')
-
-    print(f'Key file: {len(pids)} participants, {len(windows)} phase windows')
+        print(f"ERROR: no staged Atmo/LYS files found in {RAW_DIR}")
+        return
+    print(f"  Using staged Atmo/LYS rawdata ({len(existing)} files in {RAW_DIR})")
+    print(f"Key file: {len(pids)} participants, {len(windows)} phase windows")
 
     all_frames = []
-
     for pid in pids:
-        key_date = parse_key_date(str(key[key['Participant_ID'] == pid].iloc[0]['Date']))
-        print(f'Processing P{pid} ({key_date}) ...')
+        key_date = parse_key_date(str(key.loc[key["Participant_ID"] == pid, "Date"].iloc[0]))
+        print(f"Processing P{pid} ({key_date}) ...")
 
         sensor_frames = []
+        missing_sensors = []
         for sensor_id, suffix, prefix in SENSORS:
             sf = load_sensor_file(pid, suffix, prefix, windows)
-            if not sf.empty:
-                sensor_frames.append(sf.set_index(['ParticipantID', 'PhaseID', 'Datetime']))
+            if sf.empty:
+                missing_sensors.append(sensor_id)
+                continue
+            sensor_frames.append(sf.drop(columns=["PhaseID"], errors="ignore").set_index(["ParticipantID", "Datetime"]))
 
         if not sensor_frames:
-            print(f'  => P{pid}: no data')
+            print(f"  => P{pid}: no data")
             continue
+        if missing_sensors:
+            print(f"  => P{pid}: missing sensors {missing_sensors}")
 
         merged = sensor_frames[0]
         for sf in sensor_frames[1:]:
-            merged = merged.join(sf, how='outer')
+            merged = merged.join(sf, how="outer")
         merged = merged.reset_index()
         all_frames.append(merged)
-        print(f'  => P{pid}: {len(merged):,} merged rows')
+        print(f"  => P{pid}: {len(merged):,} merged rows")
 
     if not all_frames:
-        print('\nWARNING: No data processed for any participant.')
+        print("\nWARNING: No data processed for any participant.")
         return
 
-    out = pd.concat(all_frames, ignore_index=True)
-    out = out.sort_values(['ParticipantID', 'PhaseID', 'Datetime']).reset_index(drop=True)
+    out = pd.concat(all_frames, ignore_index=True).sort_values(["ParticipantID", "Datetime"]).reset_index(drop=True)
 
-    # Left-join onto index backbone
     if INDEX_FILE.exists():
         idx = pd.read_csv(INDEX_FILE, low_memory=False)
-        idx['Datetime']      = pd.to_datetime(idx['Datetime'])
-        idx['ParticipantID'] = idx['ParticipantID'].astype(str)
-        idx['PhaseID']       = idx['PhaseID'].astype(str)
-        out['Datetime']      = pd.to_datetime(out['Datetime']).dt.floor('10s')
-        out['ParticipantID'] = out['ParticipantID'].astype(str)
-        out['PhaseID']       = out['PhaseID'].astype(str)
-        result = idx[['ParticipantID', 'PhaseID', 'Datetime', 'Date']].merge(
-            out, on=['ParticipantID', 'PhaseID', 'Datetime'], how='left'
+        idx["Datetime"] = pd.to_datetime(idx["Datetime"])
+        idx["ParticipantID"] = idx["ParticipantID"].astype(str)
+        out["Datetime"] = pd.to_datetime(out["Datetime"]).dt.floor("10s")
+        out["ParticipantID"] = out["ParticipantID"].astype(str)
+        out = idx[["ParticipantID", "PhaseID", "Datetime", "Date"]].merge(
+            out,
+            on=["ParticipantID", "Datetime"],
+            how="left",
         )
-        # Forward-fill small gaps (≤3 min / 18 slots) within each phase
-        signal_cols = result.columns[4:]
-        if len(signal_cols):
-            result[signal_cols] = result.groupby(['ParticipantID', 'PhaseID'])[signal_cols].transform(
-                lambda g: g.ffill(limit=18)
-            )
-        out = result
-        n_missing = out.iloc[:, 4:].isna().all(axis=1).sum()
-        out['PhaseID'] = out['PhaseID'].fillna('').astype(str).replace({'nan':'','None':''})
-        print(f'  Index join: {len(idx):,} index slots, {n_missing:,} have no sensor data')
+        n_missing = int(out.iloc[:, 4:].isna().all(axis=1).sum())
+        print(f"  Index join: {len(idx):,} index slots, {n_missing:,} have no sensor data")
     else:
-        print(f'  NOTE: {INDEX_FILE.name} not found')
+        print(f"  NOTE: {INDEX_FILE.name} not found")
 
-    out_path = OUTPUTS / '03_atmo_lys_merged.csv'
     out.to_csv(out_path, index=False)
-    print(f'\nSaved {len(out):,} rows => {out_path}')
-    print(f'Participants: {sorted(out["ParticipantID"].unique())}')
-    print(f'Phases:       {sorted(out["PhaseID"].dropna().unique())}')
-    print(f'Columns ({len(out.columns)}): {out.columns.tolist()}')
+    print(f"\nSaved {len(out):,} rows => {out_path}")
+    print(f"Participants: {sorted(out['ParticipantID'].unique())}")
+    print(f"Phases:       {sorted(out['PhaseID'].dropna().unique())}")
+    print(f"Columns ({len(out.columns)}): {out.columns.tolist()}")
 
-    # ── POST-PROCESS: clean out_path ──
     clean_atmo_lys(out_path)
+    derive_lys_categories(out_path)
 
 
-def clean_atmo_lys(path: Path):
-    """Read CSV, clip negatives, fill all NaN, save in-place."""
-    print(f'  Cleaning {path.name} ...')
-    df = pd.read_csv(path)
-    # Clip negatives to 0
-    numeric_cols = df.select_dtypes(include=['int','float']).columns
-    for c in numeric_cols:
-        df[c] = pd.to_numeric(df[c], errors='coerce').clip(lower=0)
-    # Normalise PhaseID
-    df['PhaseID'] = df['PhaseID'].fillna('').astype(str).replace({'nan':'','None':''})
-    # Fill remaining NaN within each (ParticipantID, minute) group
-    sig = [c for c in df.columns if c not in ('ParticipantID','PhaseID','Datetime','Date','key_0')]
-    df['_minute'] = pd.to_datetime(df['Datetime']).dt.floor('1min')
-    for _, grp in df.groupby(['ParticipantID','_minute']):
-        df.loc[grp.index, sig] = grp[sig].ffill().bfill()
-    df = df.drop(columns=['_minute'])
-    df[sig] = df[sig].bfill().ffill()  # catch any remaining
-    df.to_csv(path, index=False)
-    nan_left = df.isna().sum().sum()
-    neg_left = (df[numeric_cols] < 0).sum().sum()
-    print(f'  Cleaned: NaN={nan_left}, Negatives={neg_left}')
-    if nan_left == 0 and neg_left == 0:
-        print('  ✅ Zero blanks, zero negatives')
-    else:
-        print(f'  ⚠️  Remaining: NaN={nan_left}, Neg={neg_left}')
-
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

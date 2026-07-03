@@ -3,8 +3,8 @@
 =========================
 Generates quality HTML report for Pupil Labs Neon eyetracker data.
 
-Reads:  outputs/04_eyetracker_10sec.csv (via _paths.py)
-Output: outputs/14_eyetracker_quality_report.html
+Reads:  Paper3_Github/output/04_eyetracker_10sec.csv (via _paths.py)
+Output: Paper3_Github/output/14_eyetracker_quality_report.html
 """
 import warnings; warnings.filterwarnings('ignore')
 import base64, io
@@ -16,10 +16,11 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import numpy as np
 import pandas as pd
-from _paths import OUTPUTS
+from _paths import KEY_FILE, OUTPUTS, load_key_unique
 
 CSV_IN   = OUTPUTS / '04_eyetracker_10sec.csv'
 HTML_OUT = OUTPUTS / '14_eyetracker_quality_report.html'
+DEFAULT_VISIBLE_PIDS = {f'P{p}' for p in [4, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]}
 
 PHASES = ['BikeU','WalkU','BikeG','WalkG','Tram']
 PHASE_COLORS = {'BikeU':'#d45500','WalkU':'#b8860b','BikeG':'#1a6b1a','WalkG':'#52b852','Tram':'#7f8c8d'}
@@ -75,8 +76,18 @@ def make_phase_plot(pid_str, df_pid):
 def generate_html():
     print('  [14_eyetracker_validate] ...')
     df=pd.read_csv(CSV_IN,parse_dates=['Datetime'])
-    pids=sorted(df['ParticipantID'].dropna().unique(),key=lambda x:int(x.replace('P','')))
-    print(f'  {len(pids)} participants, {len(df):,} rows')
+    key=load_key_unique(KEY_FILE).copy()
+    key["Participant_ID"]=key["Participant_ID"].astype(int)
+    pids=[f"P{pid}" for pid in key["Participant_ID"].tolist()]
+    observed_pids=set(df['ParticipantID'].dropna().astype(str))
+    unexpected=sorted(observed_pids-set(pids),key=lambda x:int(x.replace('P','')))
+    if unexpected:
+        print(f'  [WARN] unexpected participants in eyetracker CSV: {unexpected}')
+    print(f'  {len(pids)} expected participants, {len(observed_pids)} observed, {len(df):,} rows')
+    participant_checks=''.join(
+        f'<label><input type="checkbox" class="participant-cb" data-pid="{pid}"{" checked" if pid in DEFAULT_VISIBLE_PIDS else ""}> {pid}</label>'
+        for pid in pids
+    )
     html=[f'''<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Eyetracker Quality Report</title>
 <style>
   body{{font-family:-apple-system,BlinkMacSystemFont,sans-serif;margin:20px;background:#f5f5f5}}
@@ -88,15 +99,23 @@ def generate_html():
   .badge{{display:inline-block;padding:2px 8px;border-radius:4px;color:#fff;font-weight:bold;font-size:0.85em}}
   .section{{background:#fff;padding:15px;margin-bottom:20px;border-radius:5px;box-shadow:0 1px 3px rgba(0,0,0,0.1)}}
   .section h2{{color:#2c3e50;border-bottom:2px solid #3498db;padding-bottom:8px;margin-top:0}}
+  .controls{{background:#fff;padding:12px 15px;margin-bottom:20px;border-radius:5px;box-shadow:0 1px 3px rgba(0,0,0,0.1)}}
+  .controls label{{display:inline-flex;align-items:center;gap:6px;margin:4px 12px 4px 0;font-weight:600}}
   .plot-img{{width:100%;border:1px solid #ccc;border-radius:4px;margin-top:10px}}.na{{color:#999;text-align:center}}
   .footer{{text-align:center;color:#999;margin:30px 0}}
 </style></head><body>
-<div class="header"><h1>Pupil Labs Neon - Eyetracker Quality Report</h1><p>Generated: {datetime.now().strftime("%Y-%m-%d %H:%M")}</p></div>''']
+<div class="header"><h1>Pupil Labs Neon - Eyetracker Quality Report</h1><p>Generated: {datetime.now().strftime("%Y-%m-%d %H:%M")}</p></div>
+<div class="controls"><strong>Visible participants:</strong> {participant_checks}</div>''']
     for pid in pids:
+        visible = pid in DEFAULT_VISIBLE_PIDS
+        section_style = '' if visible else ' style="display:none"'
         pdf_all=df[df['ParticipantID']==pid]
-        # Only count rows within the 5 experiment phases (exclude between-phase gaps)
         pdf=pdf_all[pdf_all['PhaseID'].isin(PHASES)].copy()
-        html.append(f'<div class="section"><h2>{pid}</h2>')
+        html.append(f'<div class="section participant-section" data-pid="{pid}"{section_style}><h2>{pid}</h2>')
+        if pdf.empty:
+            html.append('<p class="na">No eyetracker rows found for this key participant.</p>')
+            html.append('</div>')
+            continue
         html.append('<table><tr><th>Signal</th><th>Count</th><th>NaN%</th><th>Mean</th><th>Min</th><th>Max</th><th>Q25</th><th>Q75</th></tr>')
         for col_name,label,_ in PLOT_SIGNALS:
             if col_name not in pdf.columns: continue
@@ -107,7 +126,14 @@ def generate_html():
         html.append('</table>')
         html.append(f'<img class="plot-img" src="data:image/png;base64,{make_phase_plot(pid,pdf)}">')
         html.append('</div>')
-    html.append(f'<div class="footer">Report end - {datetime.now().strftime("%Y-%m-%d %H:%M")}</div></body></html>')
+    html.append(f'''<div class="footer">Report end - {datetime.now().strftime("%Y-%m-%d %H:%M")}</div>
+<script>
+document.querySelectorAll('.participant-cb').forEach(function(cb){{
+  cb.addEventListener('change', function(){{
+    document.querySelectorAll('.participant-section[data-pid="'+cb.dataset.pid+'"]').forEach(function(el){{ el.style.display = cb.checked ? '' : 'none'; }});
+  }});
+}});
+</script></body></html>''')
     HTML_OUT.parent.mkdir(parents=True,exist_ok=True)
     with open(HTML_OUT,'w',encoding='utf-8') as f: f.write('\n'.join(html))
     print(f'Saved: {HTML_OUT}')
