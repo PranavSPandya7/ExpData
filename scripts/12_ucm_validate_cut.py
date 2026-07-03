@@ -30,7 +30,7 @@ OUT_HTML = str(OUTPUTS / '12_ucm_quality_report_cut.html')
 
 PARTICIPANTS = None   # populated from key.csv and source roots in main()
 BIKEU_CUT_WINDOWS = {} # pid -> (Cut_start, Cut_end), populated from key.csv
-DEFAULT_UNCHECKED_PIDS = {1, 2, 3}
+DEFAULT_UNCHECKED_PIDS = {1, 2, 3, 18}
 PHASES       = ["BikeU", "WalkU", "BikeG", "WalkG", "Tram"]
 REPORT_PHASES = ["BikeU", "WalkU", "BikeG", "WalkG", "Tram"]
 EXCLUDED_NOTE_PHASES = set()
