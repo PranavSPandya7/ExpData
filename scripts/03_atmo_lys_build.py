@@ -14,7 +14,9 @@ from _paths import (
     RAW_ATMO_DIR,
     assert_sensor_folder_clean,
     load_key_unique,
+    setup_build_warning_log,
 )
+setup_build_warning_log(__file__)
 
 RAW_DIR = RAW_ATMO_DIR
 INDEX_FILE = OUTPUTS / "00_index_10sec.csv"

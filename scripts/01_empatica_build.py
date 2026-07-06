@@ -24,7 +24,8 @@ RAW_EMPA = Path(r'C:\Users\pandya\Documents\Github\docker\Paper3_Github\rawdata\
 SCRIPTS_DIR = Path(r'C:\Users\pandya\Documents\Github\docker\ExpData\scripts')
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
-from _paths import assert_sensor_folder_clean
+from _paths import assert_sensor_folder_clean, log_build_warning, setup_build_warning_log
+setup_build_warning_log(__file__)
 assert_sensor_folder_clean('empatica', RAW_EMPA)
 EMPATICA_FILES_DIR = Path(r'C:\Users\pandya\Documents\Github\docker\Paper3_Github\output\empatica_files')
 KEY_FILE = Path(r'C:\Users\pandya\Documents\Github\docker\Paper3_Github\output\key.csv')
@@ -161,7 +162,7 @@ def read_avro_sensors(avro_path):
                 index=_us_to_brussels(us),
             )
         elif n > 0:
-            print(f"[WARN] invalid AVRO accelerometer block skipped: {avro_path} (samplingFrequency={sf})")
+            log_build_warning(f"[WARN] invalid AVRO accelerometer block skipped: {avro_path} (samplingFrequency={sf})")
 
     e = raw.get('eda')
     if e:
@@ -172,7 +173,7 @@ def read_avro_sensors(avro_path):
             vals = pd.to_numeric(pd.Series(e['values']), errors='coerce').to_numpy(dtype=float)
             sensors['eda'] = pd.DataFrame({'empatica__eda_scl_usiemens': vals}, index=_us_to_brussels(us))
         elif n > 0:
-            print(f"[WARN] invalid AVRO EDA block skipped: {avro_path} (samplingFrequency={sf})")
+            log_build_warning(f"[WARN] invalid AVRO EDA block skipped: {avro_path} (samplingFrequency={sf})")
 
     t = raw.get('temperature')
     if t:
@@ -182,7 +183,7 @@ def read_avro_sensors(avro_path):
             us = np.round(t['timestampStart'] + np.arange(n) * (1e6 / sf)).astype(np.int64)
             sensors['temperature'] = pd.DataFrame({'temperature': t['values']}, index=_us_to_brussels(us))
         elif n > 0:
-            print(f"[WARN] invalid AVRO temperature block skipped: {avro_path} (samplingFrequency={sf})")
+            log_build_warning(f"[WARN] invalid AVRO temperature block skipped: {avro_path} (samplingFrequency={sf})")
 
     peaks = raw.get('systolicPeaks', {}).get('peaksTimeNanos', [])
     if len(peaks) >= 2:
@@ -211,7 +212,7 @@ for pid in sorted(clip_windows):
         try:
             sensors = read_avro_sensors(avro_path)
         except Exception as exc:
-            print(f'  [WARN] {pid} {avro_path.name}: {exc}')
+            log_build_warning(f'  [WARN] {pid} {avro_path.name}: {exc}')
             continue
         if 'eda' in sensors:
             eda_parts.append(sensors['eda'])

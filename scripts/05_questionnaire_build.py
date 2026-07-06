@@ -7,7 +7,8 @@ import pandas as pd
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import KEY_FILE, OUTPUTS, QUEST_SOURCE, RAW_QUEST_DIR, assert_sensor_folder_clean, load_key_unique
+from _paths import KEY_FILE, OUTPUTS, QUEST_SOURCE, RAW_QUEST_DIR, assert_sensor_folder_clean, load_key_unique, setup_build_warning_log
+setup_build_warning_log(__file__)
 
 # -- Paths --
 SOURCE_CPW = QUEST_SOURCE
