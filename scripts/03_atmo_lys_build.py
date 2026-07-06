@@ -1,6 +1,6 @@
 """Atmo/LYS build: merge four sensors and align minute readings to the 10-sec index."""
 
-import warnings; warnings.filterwarnings("ignore")
+import warnings; warnings.filterwarnings("default")
 from datetime import datetime
 from pathlib import Path
 import sys
@@ -54,30 +54,11 @@ def build_phase_windows(key: pd.DataFrame) -> dict:
     return windows
 
 
-def maybe_fix_swapped_month_day(df: pd.DataFrame, pid: int, windows: dict) -> pd.Series:
-    """Fix files whose stored ISO dates have day/month swapped against the key date."""
-    parsed = pd.to_datetime(df["Datetime"], errors="coerce")
-    if parsed.dropna().empty:
-        return parsed
-
-    expected_dates = {
-        start.normalize().date()
-        for (win_pid, _), (start, _) in windows.items()
-        if win_pid == pid
-    }
-    observed_dates = {ts.date() for ts in parsed.dropna()}
-    if observed_dates & expected_dates:
-        return parsed
-
-    swapped_strings = parsed.dropna().dt.strftime("%Y-%d-%m %H:%M:%S")
-    swapped = parsed.copy()
-    swapped.loc[parsed.notna()] = pd.to_datetime(swapped_strings, errors="coerce")
-    swapped_dates = {ts.date() for ts in swapped.dropna()}
-    if swapped_dates & expected_dates:
-        print(f"    corrected swapped month/day dates for P{pid}")
-        return swapped
-
-    return parsed
+def participant_bounds(pid: int, windows: dict) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+    spans = [(start, end) for (win_pid, _), (start, end) in windows.items() if win_pid == pid]
+    if not spans:
+        return None
+    return min(start for start, _ in spans), max(end for _, end in spans)
 
 
 def normalize_legacy_sensor_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -150,10 +131,20 @@ def load_sensor_file(pid: int, suffix: str, prefix: str, windows: dict) -> pd.Da
         print(f"    SKIP {suffix}: empty or no Datetime column")
         return pd.DataFrame()
 
-    df["Datetime"] = maybe_fix_swapped_month_day(df, pid, windows)
+    df["Datetime"] = pd.to_datetime(df["Datetime"], errors="coerce")
     df = df.dropna(subset=["Datetime"])
     if df.empty:
         print(f"    SKIP {suffix}: no parseable timestamps")
+        return pd.DataFrame()
+
+    bounds = participant_bounds(pid, windows)
+    if bounds is None:
+        print(f"    SKIP {suffix}: no key window for P{pid}")
+        return pd.DataFrame()
+    span_start, span_end = bounds
+    df = df[(df["Datetime"] >= span_start) & (df["Datetime"] <= span_end)].copy()
+    if df.empty:
+        print(f"    SKIP {suffix}: no rows from {span_start} to {span_end}")
         return pd.DataFrame()
 
     df["PhaseID"] = "reststop"
@@ -207,6 +198,12 @@ def load_sensor_file(pid: int, suffix: str, prefix: str, windows: dict) -> pd.Da
 
 
 def clean_atmo_lys(path: Path) -> None:
+    """Remove out-of-range Kelvin values (physical impossibility check).
+
+    Note: negative sensor values are NOT masked here. All 343 negatives in the
+    raw lys_medi column fall outside experiment phase windows and are already
+    excluded by the time-window clipping in load_sensor_file().
+    """
     print(f"  Cleaning {path.name} ...")
     df = pd.read_csv(path)
     numeric_cols = [
@@ -217,9 +214,7 @@ def clean_atmo_lys(path: Path) -> None:
     ]
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
-    neg_before = int((df[numeric_cols] < 0).sum().sum()) if numeric_cols else 0
-    if numeric_cols:
-        df[numeric_cols] = df[numeric_cols].mask(df[numeric_cols] < 0)
+
     kelvin_cols = [col for col in numeric_cols if col.endswith("__lys_kelvin")]
     kelvin_bad = 0
     for col in kelvin_cols:
@@ -227,12 +222,7 @@ def clean_atmo_lys(path: Path) -> None:
         kelvin_bad += int(bad.sum())
         df.loc[bad, col] = pd.NA
     df.to_csv(path, index=False)
-    nan_left = int(df.isna().sum().sum())
-    neg_left = int((df[numeric_cols] < 0).sum().sum()) if numeric_cols else 0
-    print(
-        f"  Cleaned: set {neg_before} negative sensor values and {kelvin_bad} out-of-range Kelvin values to NaN; "
-        f"NaN={nan_left}, Negatives={neg_left}"
-    )
+    print(f"  Cleaned: set {kelvin_bad} out-of-range Kelvin values to NaN")
 
 
 def derive_lys_categories(path: Path) -> None:

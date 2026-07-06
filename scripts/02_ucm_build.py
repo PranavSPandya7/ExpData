@@ -1,6 +1,6 @@
 """UCM backpack: read GPS/environmental CSVs, clean, resample to 10-sec, align to index."""
 
-import warnings; warnings.filterwarnings('ignore')
+import warnings; warnings.filterwarnings("default")
 
 from pathlib import Path
 import pandas as pd
@@ -16,50 +16,42 @@ def flag_bad_gps_points(df, phase):
     Return a boolean mask (True = bad, should be excluded).
 
     Exclusion criteria:
-    1. HDOP > 5              — poor satellite geometry
-    2. IO_flag == 9          — receiver reports no fix
+    1. HDOP > 5              - poor satellite geometry
+    2. IO_flag == 9          - receiver reports no fix
     """
     n = len(df)
     bad = np.zeros(n, dtype=bool)
 
-    # ── 1. HDOP > 5 ─────────────────────────────────────────────────────
+    # 1. HDOP > 5
     if "GPS_HDOP" in df.columns:
         hdop = df["GPS_HDOP"].values
         bad |= (hdop > 5)
 
-    # ── 2. IO_flag == 9 ────────────────────────────────────────────────
+    # 2. IO_flag == 9
     if "IO_flag" in df.columns:
         io_bad = df["IO_flag"].values == 9
         bad |= io_bad
 
     return bad
 
-# ── PATHS ────────────────────────────────────────────────────────────────────
+# Paths
 RAW_DATA_ROOT = RAW_DATA_DIR
 INDEX_FILE    = OUTPUTS / '00_index_10sec.csv'
 
-# ── SKIP-GATE CONFIG ─────────────────────────────────────────────────────────
+# Skip-gate config
 FORCE_RERUN = True
 
 PHASES = ['BikeU', 'WalkU', 'BikeG', 'WalkG', 'Tram']
-DUPLICATE_PATH_TOKENS = (" copy", "- copy", "_copy", "backup", "old", "temp", "archive")
 
 
-# ── INPUT CHECK: use staged repo rawdata/ucm/ ────────────────────────────────
+# Input check: use staged repo rawdata/ucm/
 def discover_ucm_candidates(pid: int, phase: str) -> list[Path]:
     """Find plausible UCM CSV candidates without crossing into other sensor folders."""
     root = RAW_DATA_ROOT / '02_ucm'
     candidates = []
 
-    def is_duplicate_like_path(path: Path) -> bool:
-        return any(
-            any(token in part.lower() for token in DUPLICATE_PATH_TOKENS)
-            for part in path.parts
-        )
-
     def add_candidate(path: Path) -> None:
-        if not is_duplicate_like_path(path):
-            candidates.append(path)
+        candidates.append(path)
 
     flat = root / f'P{pid}_{phase}.csv'
     if flat.exists():
@@ -127,22 +119,12 @@ def select_ucm_csv(pid: int, phase: str, idx_start, idx_end):
     if not scored:
         return None, None
 
-    def candidate_penalty(path: Path) -> int:
-        parts = [part.lower() for part in path.parts]
-        return int(any(any(token in part for token in DUPLICATE_PATH_TOKENS) for part in parts))
-
-    scored.sort(key=lambda item: (-item[0], candidate_penalty(item[1]), str(item[1]).lower()))
+    scored.sort(key=lambda item: (-item[0], str(item[1]).lower()))
     best_overlap = scored[0][0]
     tied = [item for item in scored if item[0] == best_overlap]
     if len(tied) > 1:
-        selected_penalty = candidate_penalty(scored[0][1])
-        tied_same_rank = [
-            item for item in tied
-            if candidate_penalty(item[1]) == selected_penalty
-        ]
-        if len(tied_same_rank) > 1:
-            paths = '\n    '.join(str(item[1]) for item in tied_same_rank)
-            print(f'  WARNING: tied UCM candidates for P{pid} {phase}; using first deterministic path:\n    {paths}')
+        paths = '\n    '.join(str(item[1]) for item in tied)
+        print(f'  WARNING: tied UCM candidates for P{pid} {phase}; using first deterministic path:\n    {paths}')
 
     overlap, path, df = scored[0]
     if idx_start is not None and idx_end is not None:
@@ -191,12 +173,12 @@ def read_ucm_file(path: Path, phase: str, idx_start=None, idx_end=None):
         print(f'  WARNING: no valid timestamps in {path}')
         return None
 
-    # ── GPS quality filter (HDOP, IO_flag) ─────────────────────────────
+    # GPS quality filter (HDOP, IO_flag)
     n_before = len(df)
     bad_mask = flag_bad_gps_points(df, phase)
     # Nullify GPS-dependent columns for bad epochs so they don't
     # pollute the 10-second means. Environmental data (AIR, AQ, SND,
-    # WIND, SUN, IR) are kept as-is — the sensor was still recording.
+    # WIND, SUN, IR) are kept as-is; the sensor was still recording.
     for col in ['GPS_lat', 'GPS_lon', 'GPS_alt', 'GPS_speed', 'GPS_hdg']:
         if col in df.columns:
             df.loc[bad_mask, col] = np.nan
@@ -208,14 +190,14 @@ def read_ucm_file(path: Path, phase: str, idx_start=None, idx_end=None):
     return df
 
 
-# ── MAIN ─────────────────────────────────────────────────────────────────────
+# Main
 def main():
-    # ── Step 1: Check staged rawdata ─────────────────────────────────────
+    # Step 1: Check staged rawdata
     print("=" * 55)
-    print("  [UCM Build] Step 1 — Check staged rawdata")
+    print("  [UCM Build] Step 1 - Check staged rawdata")
     print("=" * 55)
     assert_sensor_folder_clean("ucm", RAW_DATA_ROOT / '02_ucm')
-    # ── Step 2: Build 10-sec CSV ────────────────────────────────────────
+    # Step 2: Build 10-sec CSV
     out_path = OUTPUTS / '02_ucm_10sec.csv'
     if out_path.exists() and not FORCE_RERUN:
         print(f'Output file already exists: {out_path}. Skipping UCM build (FORCE_RERUN=False).')
@@ -317,7 +299,7 @@ def main():
     out = pd.concat(all_frames, ignore_index=True)
     out = out.sort_values(['ParticipantID', 'PhaseID', 'Datetime']).reset_index(drop=True)
 
-    # ── Left-join onto index backbone (guarantees every 10-sec slot is present) ──
+    # Left-join onto index backbone; guarantees every 10-sec slot is present.
     # Source phase is only used to select the correct UCM file/window. The canonical
     # output PhaseID must come from the shared index so reststop boundary rows stay aligned.
     if idx_df is not None:
@@ -337,7 +319,7 @@ def main():
         n_missing = out.iloc[:, 4:].isna().all(axis=1).sum()
         print(f'  Index join: {len(idx_df):,} index slots, {n_missing:,} have no UCM data')
     else:
-        print(f'  NOTE: {INDEX_FILE.name} not found — run 00_index_build.py first')
+        print(f'  NOTE: {INDEX_FILE.name} not found - run 00_index_build.py first')
 
     aq_cols = [c for c in out.columns if c.startswith('AQ_')]
     n_negative_aq = 0

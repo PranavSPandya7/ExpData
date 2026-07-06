@@ -1,7 +1,7 @@
 """Merge index-aligned sensor and questionnaire CSVs into one wide file."""
 
 import warnings
-warnings.filterwarnings("ignore")
+warnings.filterwarnings("default")
 
 from pathlib import Path
 import sys

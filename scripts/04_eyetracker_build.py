@@ -7,14 +7,14 @@ from functools import lru_cache
 import numpy as np
 import pandas as pd
 
-warnings.filterwarnings("ignore")
+warnings.filterwarnings("default")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _paths import KEY_FILE, OUTPUTS, RAW_ET_DIR, assert_sensor_folder_clean, key_participant_ids
 
 STAGED_ROOT = RAW_ET_DIR
+PER_FOLDER_OUTPUT_ROOT = OUTPUTS / "04_eyetracker_output"
 
 PHASES = ["BikeU", "WalkU", "BikeG", "WalkG", "Tram"]
-DUPLICATE_PATH_TOKENS = (" copy", "- copy", "_copy", "backup", "old", "temp", "archive")
 MIN_SAMPLES_10S = 600
 KEY_COLS = ["ParticipantID", "PhaseID", "Datetime", "Date"]
 SIGNAL_COLS = [
@@ -58,13 +58,6 @@ def parse_export_folder_name(folder_name):
     return pid, phase
 
 
-def is_duplicate_like_path(path: Path) -> bool:
-    return any(
-        any(token in part.lower() for token in DUPLICATE_PATH_TOKENS)
-        for part in path.parts
-    )
-
-
 @lru_cache(maxsize=1)
 def get_staged_exports():
     assert_sensor_folder_clean("eyetracker", STAGED_ROOT)
@@ -74,7 +67,7 @@ def get_staged_exports():
 
     folders = sorted(
         d for d in STAGED_ROOT.iterdir()
-        if d.is_dir() and not is_duplicate_like_path(d)
+        if d.is_dir()
     )
     print(f"Found {len(folders)} staged eyetracker folders")
 
@@ -212,8 +205,8 @@ def process_folder(pdir, pid, phase):
         gaze.groupby("b10s")
         .agg(
             in_fixation=("in_fixation", "mean"),
-            in_saccade=("in_saccade", "max"),
-            in_blink=("in_blink", "max"),
+            in_saccade=("in_saccade", "mean"),
+            in_blink=("in_blink", "mean"),
             blink_dur=("blink_dur", "mean"),
             fixation_dur=("fixation_dur", "mean"),
             gaze_vel=("gaze_vel_raw", "mean"),
@@ -228,6 +221,8 @@ def process_folder(pdir, pid, phase):
     )
 
     g10s["in_fixation"] = (g10s["in_fixation"] > 0.5).astype(int)
+    g10s["in_saccade"] = (g10s["in_saccade"] > 0.5).astype(int)
+    g10s["in_blink"] = (g10s["in_blink"] > 0.5).astype(int)
     g10s = g10s[g10s["n"] >= MIN_SAMPLES_10S].copy()
     if len(g10s) == 0:
         return None
@@ -242,7 +237,7 @@ def process_folder(pdir, pid, phase):
             if invalid_peak.any() and valid_denominator:
                 invalid_pct = 100 * int(invalid_peak.sum()) / valid_denominator
                 print(
-                    f"  {pid} {phase}: retained {int(invalid_peak.sum()):,}/{valid_denominator:,} "
+                    f"  {pid} {phase}: filtered out {int(invalid_peak.sum()):,}/{valid_denominator:,} "
                     f"raw saccade peak velocity values outside 0-9000 px/s ({invalid_pct:.2f}%)"
                 )
         amp_col = None
@@ -250,12 +245,21 @@ def process_folder(pdir, pid, phase):
             amp_col = "amplitude [deg]"
         elif "amplitude [px]" in sac.columns:
             amp_col = "amplitude [px]"
+        
+        sac_clean = sac.copy()
+        if "peak velocity [px/s]" in sac_clean.columns:
+            sac_clean["peak velocity [px/s]"] = pd.to_numeric(sac_clean["peak velocity [px/s]"], errors="coerce")
+            sac_clean["peak velocity [px/s]"] = sac_clean["peak velocity [px/s]"].where(
+                (sac_clean["peak velocity [px/s]"] > 0) & (sac_clean["peak velocity [px/s]"] < 9000),
+                np.nan
+            )
+        
         sa = (
-            sac.groupby("b10s")
+            sac_clean.groupby("b10s")
             .agg(
                 sac_dur=("dur_s", "mean"),
                 sac_amp=(amp_col, "mean") if amp_col is not None else ("dur_s", "size"),
-                sac_peak=("peak velocity [px/s]", "mean"),
+                sac_peak=("peak velocity [px/s]", "mean") if "peak velocity [px/s]" in sac_clean.columns else ("dur_s", "size"),
             )
             .reset_index()
         )
@@ -280,17 +284,9 @@ def process_folder(pdir, pid, phase):
     g10s["fix_count"] = g10s["fix_count"].astype(int)
     g10s["fixation_rate"] = g10s["fix_count"] / 10.0
 
-    fc = g10s["fix_count"]
-    fc_min, fc_max = fc.min(), fc.max()
-    g10s["fixation_count_scaled"] = (fc - fc_min) / (fc_max - fc_min) if fc_max > fc_min else np.nan
-
-    fd = g10s["fixation_dur"]
-    fd_min, fd_max = fd.min(), fd.max()
-    g10s["fixation_duration_scaled"] = 1 - (fd - fd_min) / (fd_max - fd_min) if fd_max > fd_min else np.nan
-
-    g10s["stress_composite"] = g10s[["fixation_count_scaled", "fixation_duration_scaled"]].mean(
-        axis=1, skipna=False
-    )
+    # stress_composite scaling is applied PER PARTICIPANT in main() (across all 5
+    # phases of the same person), matching Christos's reference implementation.
+    # Per-phase scaling would make within-participant cross-phase comparison invalid.
 
     idx_path = OUTPUTS / "00_index_10sec.csv"
     if idx_path.exists():
@@ -340,9 +336,13 @@ def process_folder(pdir, pid, phase):
     out["distance_from_center"] = g10s["dist_ctr"].values
     out["gaze_centrality"] = g10s["gaze_ctr"].values
     out["eyelid_aperture_avg"] = g10s["ea_avg"].values if "ea_avg" in g10s.columns else np.nan
-    out["stress_composite"] = g10s["stress_composite"].values
+    # Carry raw fixation count + duration for per-participant stress scaling in main()
+    out["_fix_count_raw"] = g10s["fix_count"].values
+    out["_fixation_dur_raw"] = g10s["fixation_dur"].values
 
-    out.to_csv(gaze_path.parent / "output.csv", index=False)
+    cache_dir = PER_FOLDER_OUTPUT_ROOT / Path(pdir).name
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    out.to_csv(cache_dir / "output.csv", index=False)
     return out
 
 
@@ -372,6 +372,32 @@ def main():
     out = align_to_index(out, "eyetracker")
     expected_pids = {f"P{pid}" for pid in key_participant_ids(KEY_FILE)}
     out = out[out["ParticipantID"].isin(expected_pids)].reset_index(drop=True)
+
+    # Per-participant min-max scaling for stress_composite (matches Christos reference).
+    # Applied across all 5 phases of the same participant so that within-person
+    # cross-phase comparisons are valid (P2 BikeU vs P2 WalkG, etc.).
+    def _min_max_scale(s):
+        s = s.astype(float)
+        valid = s.notna()
+        result = pd.Series(np.nan, index=s.index)
+        if not valid.any():
+            return result
+        lo, hi = s.loc[valid].min(), s.loc[valid].max()
+        if pd.isna(lo) or pd.isna(hi) or hi == lo:
+            result.loc[valid] = 0.5
+        else:
+            result.loc[valid] = (s.loc[valid] - lo) / (hi - lo)
+        return result
+
+    fc_raw = out.pop("_fix_count_raw")
+    fd_raw = out.pop("_fixation_dur_raw")
+    fc_scaled = fc_raw.groupby(out["ParticipantID"]).transform(_min_max_scale)
+    fd_scaled = 1 - fd_raw.groupby(out["ParticipantID"]).transform(_min_max_scale)
+    valid_stress = fc_scaled.notna() & fd_scaled.notna()
+    out["stress_composite"] = np.nan
+    out.loc[valid_stress, "stress_composite"] = pd.concat(
+        [fc_scaled.loc[valid_stress], fd_scaled.loc[valid_stress]], axis=1
+    ).mean(axis=1)
 
     out.to_csv(str(out_path), index=False)
     print(f"\nSaved: {out_path}")
