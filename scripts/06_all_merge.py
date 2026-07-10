@@ -74,8 +74,10 @@ def add_pct_complete(df: pd.DataFrame) -> pd.DataFrame:
 
         pct_vals = []
         for idx in df.index[mask]:
-            lat = df.at[idx, "GPS_lat"] if "GPS_lat" in df.columns else np.nan
-            lon = df.at[idx, "GPS_lon"] if "GPS_lon" in df.columns else np.nan
+            lat_col = "ucm_GPS_lat" if "ucm_GPS_lat" in df.columns else "GPS_lat"
+            lon_col = "ucm_GPS_lon" if "ucm_GPS_lon" in df.columns else "GPS_lon"
+            lat = df.at[idx, lat_col] if lat_col in df.columns else np.nan
+            lon = df.at[idx, lon_col] if lon_col in df.columns else np.nan
             if pd.isna(lat) or pd.isna(lon):
                 pct_vals.append(np.nan)
                 continue
@@ -106,6 +108,26 @@ def merge_input_files() -> list[Path]:
 
 def display_name(path: Path) -> str:
     return path.stem.replace("_PENDING_CLOSE_OPEN_FILE", "")
+
+
+def source_prefix(name: str) -> str:
+    prefixes = {
+        "01_empatica_corrected_10sec": "empatica",
+        "02_ucm_10sec": "ucm",
+        "03_atmo_lys_merged": "atmo_lys",
+        "04_eyetracker_10sec": "eyetracker",
+        "05_questionnaires_merged_scored": "questionnaire",
+    }
+    return prefixes.get(name, name)
+
+
+def prefix_source_columns(df: pd.DataFrame, name: str, keep: set[str]) -> pd.DataFrame:
+    prefix = source_prefix(name)
+    rename = {
+        c: c if c in keep or c.startswith(f"{prefix}_") else f"{prefix}_{c}"
+        for c in df.columns
+    }
+    return df.rename(columns=rename)
 
 
 def clean_sensor_columns(df: pd.DataFrame, name: str) -> pd.DataFrame:
@@ -139,6 +161,7 @@ def main() -> None:
             if "PhaseID" in df.columns:
                 df = df[df["PhaseID"].isin(PHASES_5)]
             df = df.drop_duplicates(subset=["ParticipantID", "PhaseID"], keep="last")
+            df = prefix_source_columns(df, name, {"ParticipantID", "PhaseID"})
             q_cols = [c for c in df.columns if c not in ("ParticipantID", "PhaseID")]
             merged = merged.merge(df[["ParticipantID", "PhaseID"] + q_cols], on=["ParticipantID", "PhaseID"], how="left")
             print(f"  {name} (questionnaire): {len(df):,} rows -> {len(q_cols)} cols")
@@ -150,6 +173,7 @@ def main() -> None:
                 df["PhaseID"] = df["PhaseID"].where(df["PhaseID"].notna(), "").astype(str).replace({"nan": "", "None": ""})
             merge_keys = [k for k in MERGE_KEYS if k in df.columns]
             df = df.drop_duplicates(subset=merge_keys, keep="first")
+            df = prefix_source_columns(df, name, set(merge_keys))
             merged = merged.merge(df, on=merge_keys, how="left", suffixes=("", "_dup"))
             merged = merged.drop(columns=[c for c in merged.columns if c.endswith("_dup")])
             sensor_cols = len(df.columns) - len(merge_keys)
