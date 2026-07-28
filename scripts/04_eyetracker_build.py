@@ -21,12 +21,9 @@ KEY_COLS = ["ParticipantID", "PhaseID", "Datetime", "Date"]
 SIGNAL_COLS = [
     "pupil_diameter_avg",
     "pupil_change_rate",
-    "in_blink",
     "blink_duration_s",
-    "in_fixation",
     "fixation_duration_s",
     "fixation_rate",
-    "in_saccade",
     "saccade_duration_s",
     "saccade_amplitude",
     "saccade_peak_velocity",
@@ -97,11 +94,85 @@ def resolve_export_file(pdir, filename):
     return matches[0] if matches else direct
 
 
+def fill_phase_edge_gaps(out):
+    filled = 0
+    out = out.sort_values(["ParticipantID", "PhaseID", "Datetime"]).copy()
+    for _, idx in out.groupby(["ParticipantID", "PhaseID"]).groups.items():
+        idx = list(idx)
+        has_signal = out.loc[idx, SIGNAL_COLS].notna().any(axis=1).to_numpy()
+        real = np.flatnonzero(has_signal)
+        if len(real) == 0:
+            continue
+        first, last = real[0], real[-1]
+        if first:
+            out.loc[[idx[i] for i in range(first)], SIGNAL_COLS] = out.loc[idx[last], SIGNAL_COLS].to_numpy()
+            filled += first
+        if last < len(idx) - 1:
+            out.loc[[idx[i] for i in range(last + 1, len(idx))], SIGNAL_COLS] = out.loc[idx[first], SIGNAL_COLS].to_numpy()
+            filled += len(idx) - last - 1
+    print(f"[eyetracker] edge-filled {filled} leading/trailing index rows from same participant-phase real rows")
+    return out
+
+
+def read_authoritative_output(pdir, pid, phase):
+    path = resolve_export_file(pdir, "output.csv")
+    if not path.exists():
+        return None
+    out = read_safe(path)
+    if out is None or len(out) == 0 or "Datetime" not in out.columns:
+        return None
+    out = out.copy()
+    out["ParticipantID"] = pid
+    out["PhaseID"] = phase
+    raw_dt = pd.to_datetime(out["Datetime"], errors="coerce")
+    idx_path = OUTPUTS / "00_index_10sec.csv"
+    idx_dt = pd.read_csv(idx_path, usecols=["ParticipantID", "PhaseID", "Datetime"])
+    idx_dt = idx_dt[(idx_dt.ParticipantID.astype(str) == pid) & (idx_dt.PhaseID.astype(str) == phase)]
+    index_slots = set(pd.to_datetime(idx_dt.Datetime))
+    local_dt = raw_dt.dt.floor("10s")
+    utc_dt = (raw_dt + pd.Timedelta(hours=2)).dt.floor("10s")
+    out["Datetime"] = utc_dt if utc_dt.isin(index_slots).sum() > local_dt.isin(index_slots).sum() else local_dt
+    out = out.dropna(subset=["Datetime"]).reset_index(drop=True)
+    out = out.drop_duplicates(["ParticipantID", "PhaseID", "Datetime"], keep="first")
+    if "Date" not in out.columns:
+        out["Date"] = pd.to_datetime(out["Datetime"], errors="coerce").dt.strftime("%Y-%m-%d")
+    for col in SIGNAL_COLS:
+        if col not in out.columns:
+            out[col] = np.nan
+    out["_fix_count_raw"] = np.nan
+    out["_fixation_dur_raw"] = np.nan
+    out["_authoritative_output"] = 1
+    return out[KEY_COLS + SIGNAL_COLS + ["_fix_count_raw", "_fixation_dur_raw", "_authoritative_output"]]
+
+
 def process_folder(pdir, pid, phase):
     gaze_path = resolve_export_file(pdir, "gaze_positions.csv")
     gaze = read_safe(gaze_path)
     if gaze is None or len(gaze) == 0:
         return None
+
+    if "__output_datetime" in gaze.columns:
+        embedded_cols = [c for c in SIGNAL_COLS if c in gaze.columns]
+        if embedded_cols:
+            embedded = (
+                gaze.dropna(subset=["__output_datetime"])
+                .groupby("__output_datetime", as_index=False)[embedded_cols]
+                .first()
+            )
+            if len(embedded) > 0:
+                out = pd.DataFrame()
+                out["Datetime"] = pd.to_datetime(embedded["__output_datetime"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
+                out = out.dropna(subset=["Datetime"]).reset_index(drop=True)
+                embedded = embedded.loc[out.index].reset_index(drop=True)
+                out["ParticipantID"] = pid
+                out["PhaseID"] = phase
+                out["Date"] = pd.to_datetime(out["Datetime"], errors="coerce").dt.strftime("%Y-%m-%d")
+                for col in SIGNAL_COLS:
+                    out[col] = embedded[col].values if col in embedded.columns else np.nan
+                out["_fix_count_raw"] = np.nan
+                out["_fixation_dur_raw"] = np.nan
+                out["_authoritative_output"] = 2
+                return out[KEY_COLS + SIGNAL_COLS + ["_fix_count_raw", "_fixation_dur_raw", "_authoritative_output"]]
 
     fix = read_safe(resolve_export_file(pdir, "fixations.csv"))
     sac = read_safe(resolve_export_file(pdir, "saccades.csv"))
@@ -205,11 +276,7 @@ def process_folder(pdir, pid, phase):
     g10s = (
         gaze.groupby("b10s")
         .agg(
-            in_fixation=("in_fixation", "mean"),
-            in_saccade=("in_saccade", "mean"),
-            in_blink=("in_blink", "mean"),
             blink_dur=("blink_dur", "mean"),
-            fixation_dur=("fixation_dur", "mean"),
             gaze_vel=("gaze_vel_raw", "mean"),
             dist_ctr=("dist_ctr_raw", "mean"),
             gaze_ctr=("gaze_ctr_raw", "mean"),
@@ -221,9 +288,6 @@ def process_folder(pdir, pid, phase):
         .reset_index()
     )
 
-    g10s["in_fixation"] = (g10s["in_fixation"] > 0.5).astype(int)
-    g10s["in_saccade"] = (g10s["in_saccade"] > 0.5).astype(int)
-    g10s["in_blink"] = (g10s["in_blink"] > 0.5).astype(int)
     g10s = g10s[g10s["n"] >= MIN_SAMPLES_10S].copy()
     if len(g10s) == 0:
         return None
@@ -273,16 +337,22 @@ def process_folder(pdir, pid, phase):
     elapsed_s = g10s["b10s"].diff()
     g10s["pd_change"] = g10s["pd_avg"].diff() / elapsed_s
 
-    prev_fixation = gaze["in_fixation"].shift(1)
-    gaze["fixation_start"] = (
-        (gaze["in_fixation"] == 1) & (prev_fixation != 1)
-    ).astype(int)
-    fix_starts = gaze.groupby("b10s")["fixation_start"].sum().reset_index()
-    fix_starts.columns = ["b10s", "fix_count"]
-    g10s = g10s.merge(fix_starts, on="b10s", how="left")
-    if g10s["fix_count"].isna().any():
-        raise ValueError(f"{pid} {phase}: internal fixation count alignment failed")
-    g10s["fix_count"] = g10s["fix_count"].astype(int)
+    # Count each fixation once, in its start-time bin. Averaging the duration
+    # copied onto every gaze sample would incorrectly duration-weight long events.
+    if fix is not None and len(fix) and "dur_s" in fix.columns:
+        fix["b10s"] = ((pd.to_numeric(fix["start timestamp [ns]"], errors="coerce") - t0) / 1e9 // 10) * 10
+        fix_events = (
+            fix.dropna(subset=["b10s", "dur_s"])
+            .groupby("b10s", as_index=False)
+            .agg(fix_count=("dur_s", "size"), fixation_dur=("dur_s", "mean"))
+        )
+        g10s = g10s.merge(fix_events, on="b10s", how="left")
+        g10s["fix_count"] = g10s["fix_count"].fillna(0).astype(int)
+    else:
+        g10s["fix_count"] = 0
+        g10s["fixation_dur"] = np.nan
+    if (g10s["fixation_dur"].notna() & g10s["fix_count"].eq(0)).any():
+        raise ValueError(f"{pid} {phase}: fixation duration exists without a fixation event")
     g10s["fixation_rate"] = g10s["fix_count"] / 10.0
 
     # stress_composite scaling is applied PER PARTICIPANT in main() (across all 5
@@ -294,11 +364,11 @@ def process_folder(pdir, pid, phase):
         idx_all = pd.read_csv(str(idx_path))
         idx_pp = idx_all[(idx_all["ParticipantID"] == pid) & (idx_all["PhaseID"] == phase)].reset_index(drop=True)
         if len(idx_pp) > 0:
-            slot_idx = (g10s["b10s"] / 10).astype(int).to_numpy()
-            keep = slot_idx < len(idx_pp)
-            g10s = g10s.loc[keep].reset_index(drop=True)
-            slot_idx = slot_idx[keep]
-            idx_dt = idx_pp["Datetime"].iloc[slot_idx].values
+            g10s["Datetime"] = (
+                pd.to_datetime(t0 + g10s["b10s"] * 1e9, unit="ns").dt.floor("10s")
+            )
+            g10s = g10s[g10s["Datetime"].isin(pd.to_datetime(idx_pp["Datetime"]))].reset_index(drop=True)
+            idx_dt = g10s["Datetime"].values
             out = pd.DataFrame(index=range(len(g10s)))
             out["ParticipantID"] = pid
             out["PhaseID"] = phase
@@ -323,12 +393,9 @@ def process_folder(pdir, pid, phase):
 
     out["pupil_diameter_avg"] = g10s["pd_avg"].values if "pd_avg" in g10s.columns else np.nan
     out["pupil_change_rate"] = g10s["pd_change"].values
-    out["in_blink"] = g10s["in_blink"].values
     out["blink_duration_s"] = g10s["blink_dur"].values
-    out["in_fixation"] = g10s["in_fixation"].values
     out["fixation_duration_s"] = g10s["fixation_dur"].values
     out["fixation_rate"] = g10s["fixation_rate"].values
-    out["in_saccade"] = g10s["in_saccade"].values
     out["saccade_duration_s"] = g10s["sac_dur"].values
     out["saccade_amplitude"] = g10s["sac_amp"].values
     out["saccade_peak_velocity"] = g10s["sac_peak"].values
@@ -340,11 +407,18 @@ def process_folder(pdir, pid, phase):
     # Carry raw fixation count + duration for per-participant stress scaling in main()
     out["_fix_count_raw"] = g10s["fix_count"].values
     out["_fixation_dur_raw"] = g10s["fixation_dur"].values
+    out["_authoritative_output"] = 0
+    for col in SIGNAL_COLS:
+        if col not in out.columns:
+            out[col] = np.nan
 
+    # Rebuild the per-recording derived output from the raw gaze/event files.
+    # The raw CSVs remain untouched; only this derived output.csv is replaced.
+    out.to_csv(Path(pdir) / "output.csv", index=False)
     cache_dir = PER_FOLDER_OUTPUT_ROOT / Path(pdir).name
     cache_dir.mkdir(parents=True, exist_ok=True)
     out.to_csv(cache_dir / "output.csv", index=False)
-    return out
+    return out[KEY_COLS + SIGNAL_COLS + ["_fix_count_raw", "_fixation_dur_raw", "_authoritative_output"]]
 
 
 def main():
@@ -358,7 +432,14 @@ def main():
             frames.append(result)
             fr = result["fixation_rate"].mean() if "fixation_rate" in result.columns else 0
             gv = result["gaze_velocity"].mean() if "gaze_velocity" in result.columns else 0
-            print(f"{pid:<4} {phase:<8} -> {len(result):3d} rows  source=raw CSVs  fix_rate={fr:.2f}  gaze_vel={gv:.0f}")
+            src = "raw CSVs"
+            if "_authoritative_output" in result.columns:
+                source_codes = set(pd.to_numeric(result["_authoritative_output"], errors="coerce").dropna().astype(int).unique())
+                if source_codes == {1}:
+                    src = "output.csv"
+                elif source_codes == {2}:
+                    src = "embedded individual CSVs"
+            print(f"{pid:<4} {phase:<8} -> {len(result):3d} rows  source={src}  fix_rate={fr:.2f}  gaze_vel={gv:.0f}")
 
     if not frames:
         print("No data.")
@@ -387,18 +468,20 @@ def main():
         if pd.isna(lo) or pd.isna(hi) or hi == lo:
             result.loc[valid] = 0.5
         else:
-            result.loc[valid] = (s.loc[valid] - lo) / (hi - lo)
+            result.loc[valid] = 0.001 + 0.998 * ((s.loc[valid] - lo) / (hi - lo))
         return result
 
+    authoritative_output = pd.to_numeric(out.pop("_authoritative_output"), errors="coerce").fillna(0).astype(int) > 0
     fc_raw = out.pop("_fix_count_raw")
     fd_raw = out.pop("_fixation_dur_raw")
-    fc_scaled = fc_raw.groupby(out["ParticipantID"]).transform(_min_max_scale)
-    fd_scaled = 1 - fd_raw.groupby(out["ParticipantID"]).transform(_min_max_scale)
-    valid_stress = fc_scaled.notna() & fd_scaled.notna()
-    out["stress_composite"] = np.nan
-    out.loc[valid_stress, "stress_composite"] = pd.concat(
-        [fc_scaled.loc[valid_stress], fd_scaled.loc[valid_stress]], axis=1
-    ).mean(axis=1)
+    raw_mask = ~authoritative_output
+    if raw_mask.any():
+        fc_scaled = fc_raw.groupby(out["ParticipantID"]).transform(_min_max_scale)
+        fd_scaled = 1 - fd_raw.groupby(out["ParticipantID"]).transform(_min_max_scale)
+        valid_stress = raw_mask & fc_scaled.notna() & fd_scaled.notna()
+        out.loc[valid_stress, "stress_composite"] = pd.concat(
+            [fc_scaled.loc[valid_stress], fd_scaled.loc[valid_stress]], axis=1
+        ).mean(axis=1)
 
     out.to_csv(str(out_path), index=False)
     print(f"\nSaved: {out_path}")
