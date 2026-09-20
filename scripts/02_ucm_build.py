@@ -42,7 +42,7 @@ INDEX_FILE    = OUTPUTS / '00_index_10sec.csv'
 # Skip-gate config
 FORCE_RERUN = True
 
-PHASES = ['BikeU', 'WalkU', 'BikeG', 'WalkG', 'Tram']
+PHASES = ['BikeU', 'WalkU', 'BikeG', 'WalkG', 'Tram', 'Indoor']
 
 
 # Input check: use staged repo rawdata/ucm/
@@ -99,7 +99,7 @@ def discover_ucm_candidates(pid: int, phase: str) -> list[Path]:
 
 
 def select_ucm_csv(pid: int, phase: str, idx_start, idx_end):
-    """Choose the candidate with the strongest overlap with the key/index phase window."""
+    """Select UCM data for a phase window without dropping split Indoor data."""
     candidates = discover_ucm_candidates(pid, phase)
     if not candidates:
         return None, None
@@ -119,6 +119,19 @@ def select_ucm_csv(pid: int, phase: str, idx_start, idx_end):
 
     if not scored:
         return None, None
+
+    if phase == 'Indoor':
+        # Indoor is a gap between route recordings, so its seconds can be split
+        # across adjacent route files. Combine every overlapping candidate here;
+        # route phases retain the single-best-file rule below.
+        combined = pd.concat([item[2] for item in scored], ignore_index=True)
+        combined = (combined.drop_duplicates(subset=['Datetime'], keep='first')
+                            .sort_values('Datetime'))
+        if idx_start is not None and idx_end is not None:
+            combined = combined[combined['Datetime'].between(idx_start, idx_end)].copy()
+        paths = [item[1] for item in scored]
+        print(f'  SELECT P{pid} Indoor: combined {len(paths)} overlapping UCM files ({len(combined)} rows)')
+        return paths, combined
 
     scored.sort(key=lambda item: (-item[0], str(item[1]).lower()))
     best_overlap = scored[0][0]

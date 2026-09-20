@@ -15,7 +15,7 @@ setup_build_warning_log(__file__)
 STAGED_ROOT = RAW_ET_DIR
 PER_FOLDER_OUTPUT_ROOT = OUTPUTS / "04_eyetracker_output"
 
-PHASES = ["BikeU", "WalkU", "BikeG", "WalkG", "Tram"]
+PHASES = ["BikeU", "WalkU", "BikeG", "WalkG", "Tram", "Indoor"]
 MIN_SAMPLES_10S = 600
 KEY_COLS = ["ParticipantID", "PhaseID", "Datetime", "Date"]
 SIGNAL_COLS = [
@@ -355,7 +355,7 @@ def process_folder(pdir, pid, phase):
         raise ValueError(f"{pid} {phase}: fixation duration exists without a fixation event")
     g10s["fixation_rate"] = g10s["fix_count"] / 10.0
 
-    # stress_composite scaling is applied PER PARTICIPANT in main() (across all 5
+    # stress_composite scaling is applied PER PARTICIPANT in main() (across all 6
     # phases of the same person), matching Christos's reference implementation.
     # Per-phase scaling would make within-participant cross-phase comparison invalid.
 
@@ -456,7 +456,7 @@ def main():
     out = out[out["ParticipantID"].isin(expected_pids)].reset_index(drop=True)
 
     # Per-participant min-max scaling for stress_composite (matches Christos reference).
-    # Applied across all 5 phases of the same participant so that within-person
+    # Applied across all 6 phases of the same participant so that within-person
     # cross-phase comparisons are valid (P2 BikeU vs P2 WalkG, etc.).
     def _min_max_scale(s):
         s = s.astype(float)

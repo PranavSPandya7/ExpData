@@ -23,7 +23,7 @@ INDEX_FILE = OUTPUTS / "00_index_10sec.csv"
 UTC_OFFSET = pd.Timedelta(hours=2)
 FORCE_RERUN = True
 
-PHASES = ["BikeU", "WalkU", "BikeG", "WalkG", "Tram"]
+PHASES = ["BikeU", "WalkU", "BikeG", "WalkG", "Tram", "Indoor"]
 SENSORS = [
     ("LYS1", "LYS1", "LYS1"),
     ("LYS2", "LYS2", "LYS2"),
