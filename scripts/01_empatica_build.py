@@ -616,7 +616,7 @@ else:
                 )
                 df.loc[row_i, 'hrv_td_sdnn'] = compute_sdnn_for_row(t_center, phase_start_naive, phase_end_naive, peak_times, rri_ms)
 
-            if phase not in {'reststop', 'Indoor'}:
+            if phase != 'reststop':
                 has_fd = False
                 for row_i, t_center in zip(sub.index, sub['Datetime']):
                     fd = compute_fd_for_row(t_center, phase_start_naive, phase_end_naive, peak_times, rri_ms)
