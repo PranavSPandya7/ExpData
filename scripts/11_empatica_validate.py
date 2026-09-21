@@ -135,6 +135,7 @@ def compute_quality_metrics(df_day, windows, pid, date_str):
     if 'vector_magnitude' in df_day.columns:
         m['acc_coverage'] = round(df_day['vector_magnitude'].notna().mean()*100,1)
     ts = df_day['timestamp']
+    sensor_cols = list(dict.fromkeys(c for c in ['eda', 'heart_rate', hrv_col, 'hrv_td_sdnn'] if c))
     for ph in PHASES:
         if (pid,ph) not in windows:
             m['phase_detail'][ph] = {'status':'no_window','rows':0,'eda_cov':0,'hr_cov':0,'rmssd_cov':0,'sdnn_cov':0}; continue
@@ -142,6 +143,9 @@ def compute_quality_metrics(df_day, windows, pid, date_str):
         ph_df = df_day[(ts>=s)&(ts<=e)]
         if len(ph_df)==0:
             m['phase_detail'][ph] = {'status':'no_data','rows':0,'eda_cov':0,'hr_cov':0,'rmssd_cov':0,'sdnn_cov':0}; continue
+        if not ph_df[sensor_cols].notna().any().any():
+            m['phase_detail'][ph] = {'status':'no_sensor_data','rows':len(ph_df),'eda_cov':0,'hr_cov':0,'rmssd_cov':0,'sdnn_cov':0,
+                                     'start':s,'end':e}; continue
         m['phases_covered'] += 1
         eda_c = round(ph_df['eda'].notna().mean()*100,1) if 'eda' in ph_df else 0
         hr_c = round(ph_df['heart_rate'].notna().mean()*100,1) if 'heart_rate' in ph_df else 0
@@ -269,6 +273,8 @@ def generate_html(all_metrics, all_plots, generated_at):
                 phase_rows.append(f'<tr><td><span style="background:{ph_col};color:#fff;padding:2px 6px;border-radius:3px;font-size:0.85em">{ph_id}</span></td><td colspan="5" style="color:#aaa">No window in key.csv</td></tr>')
             elif pd_info.get('status')=='no_data':
                 phase_rows.append(f'<tr><td><span style="background:{ph_col};color:#fff;padding:2px 6px;border-radius:3px;font-size:0.85em">{ph_id}</span></td><td colspan="5" style="background:#f8d7da;color:#c0392b;font-weight:bold">NO DATA (gap)</td></tr>')
+            elif pd_info.get('status')=='no_sensor_data':
+                phase_rows.append(f'<tr><td><span style="background:{ph_col};color:#fff;padding:2px 6px;border-radius:3px;font-size:0.85em">{ph_id}</span></td><td colspan="5" style="background:#fff3cd;color:#856404;font-weight:bold">INDEX ROWS PRESENT, NO EMPATICA SIGNAL DATA</td></tr>')
             else:
                 s_t=pd_info.get('start',''); e_t=pd_info.get('end','')
                 win_str=f'{s_t.strftime("%H:%M") if hasattr(s_t,"strftime") else "?"} \u2013 {e_t.strftime("%H:%M") if hasattr(e_t,"strftime") else "?"}'
