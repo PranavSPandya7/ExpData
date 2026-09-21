@@ -137,22 +137,25 @@ def compute_quality_metrics(df_day, windows, pid, date_str):
     ts = df_day['timestamp']
     for ph in PHASES:
         if (pid,ph) not in windows:
-            m['phase_detail'][ph] = {'status':'no_window','rows':0,'eda_cov':0,'hr_cov':0}; continue
+            m['phase_detail'][ph] = {'status':'no_window','rows':0,'eda_cov':0,'hr_cov':0,'rmssd_cov':0,'sdnn_cov':0}; continue
         s,e = windows[(pid,ph)]
         ph_df = df_day[(ts>=s)&(ts<=e)]
         if len(ph_df)==0:
-            m['phase_detail'][ph] = {'status':'no_data','rows':0,'eda_cov':0,'hr_cov':0}; continue
+            m['phase_detail'][ph] = {'status':'no_data','rows':0,'eda_cov':0,'hr_cov':0,'rmssd_cov':0,'sdnn_cov':0}; continue
         m['phases_covered'] += 1
         eda_c = round(ph_df['eda'].notna().mean()*100,1) if 'eda' in ph_df else 0
         hr_c = round(ph_df['heart_rate'].notna().mean()*100,1) if 'heart_rate' in ph_df else 0
-        m['phase_detail'][ph] = {'status':'ok','rows':len(ph_df),'eda_cov':eda_c,'hr_cov':hr_c,'start':s,'end':e}
+        rmssd_c = round(ph_df[hrv_col].notna().mean()*100,1) if hrv_col else 0
+        sdnn_c = round(ph_df['hrv_td_sdnn'].notna().mean()*100,1) if 'hrv_td_sdnn' in ph_df else 0
+        m['phase_detail'][ph] = {'status':'ok','rows':len(ph_df),'eda_cov':eda_c,'hr_cov':hr_c,
+                                 'rmssd_cov':rmssd_c,'sdnn_cov':sdnn_c,'start':s,'end':e}
     return m
 
 
 def participant_status(m):
     if m['phases_covered']==0: return 'NO DATA'
-    if m['phases_covered']<3 or (m.get('eda_coverage',0) or 0)<20: return 'POOR'
-    if m['phases_covered']<5 or (m.get('eda_coverage',0) or 0)<50: return 'FAIR'
+    if m['phases_covered']<4 or (m.get('eda_coverage',0) or 0)<20: return 'POOR'
+    if m['phases_covered']<6 or (m.get('eda_coverage',0) or 0)<50: return 'FAIR'
     return 'GOOD'
 
 
@@ -233,7 +236,7 @@ def generate_html(all_metrics, all_plots, generated_at):
         if st=='NO DATA':
             summary_rows.append(f'<tr><td><strong>P{pid}</strong></td><td><span style="background:{sc};color:#fff;padding:2px 8px;border-radius:4px">{st}</span></td><td colspan="12" style="color:#999">\u2014</td></tr>')
         else:
-            summary_rows.append(f'''<tr><td><a href="#p{pid}" style="font-weight:bold;color:#2c3e50">P{pid}</a></td><td><span style="background:{sc};color:#fff;padding:2px 8px;border-radius:4px">{st}</span></td><td>{m["total_rows"]}</td><td {_cell_bg(m["eda_coverage"],70,40)}>{fmt(m["eda_coverage"])}%</td><td>{fmt(m["eda_zero_pct"])}%</td><td>{fmt(m["eda_mean"],3)} \u00b5S</td><td {_cell_bg(m["hr_coverage"],60,30)}>{fmt(m["hr_coverage"])}%</td><td>{fmt(m["hr_mean"])} bpm</td><td>{fmt(m["hrv_mean"])} ms</td><td>{fmt(m["sdnn_mean"])} ms</td><td>{fmt(m["lfhf_mean"],2)}</td><td>{fmt(m["temp_mean"])} \u00b0C</td><td {_cell_bg(m["phases_covered"],4,2)}>{m["phases_covered"]}/5</td></tr>''')
+            summary_rows.append(f'''<tr><td><a href="#p{pid}" style="font-weight:bold;color:#2c3e50">P{pid}</a></td><td><span style="background:{sc};color:#fff;padding:2px 8px;border-radius:4px">{st}</span></td><td>{m["total_rows"]}</td><td {_cell_bg(m["eda_coverage"],70,40)}>{fmt(m["eda_coverage"])}%</td><td>{fmt(m["eda_zero_pct"])}%</td><td>{fmt(m["eda_mean"],3)} \u00b5S</td><td {_cell_bg(m["hr_coverage"],60,30)}>{fmt(m["hr_coverage"])}%</td><td>{fmt(m["hr_mean"])} bpm</td><td>{fmt(m["hrv_mean"])} ms</td><td>{fmt(m["sdnn_mean"])} ms</td><td>{fmt(m["lfhf_mean"],2)}</td><td>{fmt(m["temp_mean"])} \u00b0C</td><td {_cell_bg(m["phases_covered"],5,3)}>{m["phases_covered"]}/6</td></tr>''')
     toc_items = []
     for m in all_metrics:
         pid=m['pid']; st=m['_status']; sc=STATUS_COLOR.get(st,'#888')
@@ -271,7 +274,8 @@ def generate_html(all_metrics, all_plots, generated_at):
                 win_str=f'{s_t.strftime("%H:%M") if hasattr(s_t,"strftime") else "?"} \u2013 {e_t.strftime("%H:%M") if hasattr(e_t,"strftime") else "?"}'
                 dur_min=round((e_t-s_t).total_seconds()/60,1) if hasattr(s_t,'strftime') else '?'
                 eda_c=pd_info.get('eda_cov',0); hr_c=pd_info.get('hr_cov',0)
-                phase_rows.append(f'<tr><td><span style="background:{ph_col};color:#fff;padding:2px 6px;border-radius:3px;font-size:0.85em">{ph_id}</span></td><td style="font-size:0.85em;color:#555">{win_str}</td><td>{dur_min} min</td><td>{pd_info.get("rows",0)}</td><td {_cell_bg(eda_c,70,40)}>{eda_c}% EDA valid</td><td {_cell_bg(hr_c,60,30)}>{hr_c}% HR valid</td></tr>')
+                rmssd_c=pd_info.get('rmssd_cov',0); sdnn_c=pd_info.get('sdnn_cov',0)
+                phase_rows.append(f'<tr><td><span style="background:{ph_col};color:#fff;padding:2px 6px;border-radius:3px;font-size:0.85em">{ph_id}</span></td><td style="font-size:0.85em;color:#555">{win_str}</td><td>{dur_min} min</td><td>{pd_info.get("rows",0)}</td><td {_cell_bg(eda_c,70,40)}>{eda_c}% EDA valid</td><td {_cell_bg(hr_c,60,30)}>{hr_c}% HR valid; {rmssd_c}% RMSSD; {sdnn_c}% SDNN</td></tr>')
         plot_html = ''
         if plot_b64:
             plot_html = f'''<div class="card full-width"><h3>Full-Day Signal Time-Series</h3><p class="footnote" style="margin-bottom:8px">Shaded = experiment phases. Lines show available values only. MET is the imported Empatica 1-minute digital biomarker and is shown as a 1-minute flat step line at available timestamps; it is not interpolated.</p><img src="data:image/png;base64,{plot_b64}" style="max-width:100%;border-radius:4px" /></div>'''
