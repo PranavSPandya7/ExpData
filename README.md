@@ -12,7 +12,7 @@ The six keyed phases are `BikeU`, `WalkU`, `BikeG`, `WalkG`, `Tram`, and `Indoor
 - Staged rawdata: `C:\Users\pandya\Documents\Github\docker\Paper3_Github\rawdata`
 - Active outputs: `C:\Users\pandya\Documents\Github\docker\Paper3_Github\output`
 - Active key file: `C:\Users\pandya\Documents\Github\docker\Paper3_Github\output\key.csv`
-- Python environment: `C:\Users\pandya\Documents\Github\docker\ExpData\.venv`
+- Recommended Python environment: `C:\Users\pandya\Documents\Github\docker\ExpData\.venv` (create it from `requirements.txt` before running)
 
 Run from `C:\Users\pandya\Documents\Github\docker\ExpData`:
 
@@ -21,7 +21,7 @@ Run from `C:\Users\pandya\Documents\Github\docker\ExpData`:
 python scripts\<script_name>.py
 ```
 
-Use the same `.venv` kernel for `scripts\01_empatica_build.py`.
+Run `scripts\01_empatica_build.py` with the same `.venv` environment.
 
 ## Normal Run Order
 
@@ -200,6 +200,10 @@ All main outputs are in:
 
 - `merged_all_11participants.csv`
   - Analysis subset containing P4 and P8-P17.
+
+- `merged_all_11participants_8min.csv`
+  - Matched 8-minute base output produced by `06_all_merge.py`.
+  - Keeps the first 49 ten-second rows for each route participant-phase and all Indoor/reststop rows.
 
 ### Validation HTML outputs
 
