@@ -4,8 +4,6 @@ This is the active Paper 3 processing pipeline. It stages raw files from Final D
 
 The six keyed phases are `BikeU`, `WalkU`, `BikeG`, `WalkG`, `Tram`, and `Indoor`. Continuous recordings also have `reststop` labels for gaps between keyed phases.
 
-`README.md` is the current explanation. `PIPELINE_EXPLANATION.md` is older context and may be stale.
-
 ## Authoritative Paths
 
 - Active repo: `C:\Users\pandya\Documents\Github\docker\ExpData`
@@ -23,13 +21,13 @@ Run from `C:\Users\pandya\Documents\Github\docker\ExpData`:
 python scripts\<script_name>.py
 ```
 
-Use the same `.venv` kernel for `scripts\01_empatica_build.ipynb`.
+Use the same `.venv` kernel for `scripts\01_empatica_build.py`.
 
 ## Normal Run Order
 
 1. `00_rawdata_collect.py`
 2. `00_index_build.py`
-3. `01_empatica_build.ipynb`
+3. `01_empatica_build.py`
 4. `02_ucm_build.py`
 5. `03_atmo_lys_build.py`
 6. `04_eyetracker_build.py`
@@ -73,7 +71,7 @@ Run `00_rawdata_collect.py` first. It collects Final Data into the staged rawdat
 
 ### Sensor builds
 
-- `01_empatica_build.ipynb`
+- `01_empatica_build.py`
   - Reads Empatica AVRO files from `rawdata\01_empatica`, plus `key.csv` and `00_index_10sec.csv`.
   - Writes `01_empatica_corrected_10sec.csv`.
   - Also writes `01_empatica_native_input_intermediate.csv` and `01_empatica_rri_native.csv` for inspection/debugging of native Empatica conversion and RRI processing.
@@ -133,7 +131,7 @@ Run `00_rawdata_collect.py` first. It collects Final Data into the staged rawdat
 - `12_ucm_validate_cut.py`
   - Reads `02_ucm_10sec.csv`, `key.csv`, and Final Data UCM photos.
   - Writes `12_ucm_quality_report_cut.html`.
-  - This is the BikeU cut-window sensitivity report. To check if separate results from BikeU with more participants can be published. BikeU is split around `Cut_start` and `Cut_end` to get the matching continuous path so more Urban participants can be visually assessed while keeping the route trajectory more consistent. This adds 4, 5, 6, 7
+  - This is the BikeU cut-window sensitivity report. It uses `Cut_start` and `Cut_end` to define a continuous BikeU section for visual sensitivity assessment while keeping the route trajectory more consistent.
 
 ### Validators and QC
 
