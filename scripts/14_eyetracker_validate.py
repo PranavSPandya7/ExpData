@@ -22,8 +22,8 @@ CSV_IN   = OUTPUTS / '04_eyetracker_10sec.csv'
 HTML_OUT = OUTPUTS / '14_eyetracker_quality_report.html'
 DEFAULT_VISIBLE_PIDS = {f'P{p}' for p in [4, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]}
 
-PHASES = ['BikeU','WalkU','BikeG','WalkG','Tram']
-PHASE_COLORS = {'BikeU':'#d45500','WalkU':'#b8860b','BikeG':'#1a6b1a','WalkG':'#52b852','Tram':'#7f8c8d'}
+PHASES = ['BikeU','WalkU','BikeG','WalkG','Tram','Indoor']
+PHASE_COLORS = {'BikeU':'#d45500','WalkU':'#b8860b','BikeG':'#1a6b1a','WalkG':'#52b852','Tram':'#7f8c8d','Indoor':'#34495e'}
 
 PLOT_SIGNALS = [
     ('pupil_diameter_avg',  'Pupil diameter',  'mm'),

@@ -22,8 +22,11 @@ OUT = OUTPUTS
 INDEX_FILE = OUT / "00_index_10sec.csv"
 OUT_FILE = OUT / "mergeddata_all.csv"
 OUT_FILE_11 = OUT / "merged_all_11participants.csv"
+OUT_FILE_11_8MIN = OUT / "merged_all_11participants_8min.csv"
 MERGE_KEYS = ["ParticipantID", "PhaseID", "Datetime"]
-ROUTE_PHASES = {"BikeU", "WalkU", "BikeG", "WalkG", "Tram"}
+MATCHED_8MIN_ROWS = 49  # 0 through 480 seconds at the 10-second index resolution.
+PHASES = {"BikeU", "WalkU", "BikeG", "WalkG", "Tram", "Indoor"}
+ROUTE_PHASES = PHASES - {"Indoor"}
 QUESTIONNAIRE_PHASES = ROUTE_PHASES | {"Indoor", "Base"}
 GPKG_DIR = Path(__file__).resolve().parents[1] / "Experiment path"
 PHASE_GPKG = {p: f"{p}.gpkg" for p in ROUTE_PHASES}
@@ -131,6 +134,19 @@ def prefix_source_columns(df: pd.DataFrame, name: str, keep: set[str]) -> pd.Dat
     return df.rename(columns=rename)
 
 
+def make_matched_8min(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep the first 8 minutes of route phases and all Indoor/reststop rows."""
+    matched = df[df["ParticipantID"].astype(str).isin(VALID_11_PARTICIPANTS)].copy()
+    route = matched[matched["PhaseID"].isin(ROUTE_PHASES)].sort_values(
+        ["ParticipantID", "PhaseID", "Datetime"]
+    )
+    keep_route_index = route.groupby(
+        ["ParticipantID", "PhaseID"], sort=False, group_keys=False
+    ).head(MATCHED_8MIN_ROWS).index
+    keep = (~matched["PhaseID"].isin(ROUTE_PHASES)) | matched.index.isin(keep_route_index)
+    return matched.loc[keep].copy()
+
+
 def clean_sensor_columns(df: pd.DataFrame, name: str) -> pd.DataFrame:
     if name == "01_empatica_corrected_10sec":
         # heart_rate is the same signal as empatica__pulse_rate_bpm; keep the clearer analysis name.
@@ -161,9 +177,8 @@ def main() -> None:
         if "Datetime" not in df.columns and "questionnaires" in name:
             if "PhaseID" in df.columns:
                 df = df[df["PhaseID"].isin(QUESTIONNAIRE_PHASES)]
-                # The recurring form has one pre-exposure Base response but no
-                # explicit Indoor response. Use Base as the Indoor analysis
-                # anchor; preserve an explicit Indoor row if one is ever added.
+                # Older scored files may still label the Indoor response Base.
+                # The current questionnaire builder writes it as Indoor directly.
                 base = df[df["PhaseID"] == "Base"].copy()
                 base["PhaseID"] = "Indoor"
                 explicit = df[df["PhaseID"] != "Base"]
@@ -193,8 +208,11 @@ def main() -> None:
     merged.to_csv(OUT_FILE, index=False)
     merged_11 = merged[merged["ParticipantID"].astype(str).isin(VALID_11_PARTICIPANTS)].copy()
     merged_11.to_csv(OUT_FILE_11, index=False)
+    merged_11_8min = make_matched_8min(merged)
+    merged_11_8min.to_csv(OUT_FILE_11_8MIN, index=False)
     print(f"\nSaved: {OUT_FILE} - {len(merged):,} rows x {merged.shape[1]} cols")
     print(f"Saved: {OUT_FILE_11} - {len(merged_11):,} rows x {merged_11.shape[1]} cols")
+    print(f"Saved: {OUT_FILE_11_8MIN} - {len(merged_11_8min):,} rows x {merged_11_8min.shape[1]} cols")
     print(f"  Participants: {sorted(merged['ParticipantID'].unique())}")
     print(f"  Phases: {sorted(merged['PhaseID'].unique())}")
     print(f"  11-participant subset: {sorted(merged_11['ParticipantID'].unique())}")

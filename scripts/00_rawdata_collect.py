@@ -25,7 +25,7 @@ from _paths import (
     key_participant_ids,
 )
 
-PHASES = ["BikeU", "WalkU", "BikeG", "WalkG", "Tram"]
+PHASES = ["BikeU", "WalkU", "BikeG", "WalkG", "Tram", "Indoor"]
 ATMO_LYS_SUFFIXES = ["LYS1", "LYS2", "Atmo_left", "Atmo_right"]
 EYETRACKER_SKIP_SUFFIXES = {".mp4", ".raw", ".bin"}
 QUESTIONNAIRE_FILES = [

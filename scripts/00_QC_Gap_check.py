@@ -20,7 +20,7 @@ OUT_INVALID = OUTPUTS / "QC_invalid_percent_by_column.csv"
 
 KEYS = ["ParticipantID", "PhaseID", "Datetime"]
 PHASES = {"BikeU", "WalkU", "BikeG", "WalkG", "Tram", "Indoor"}
-EYE_PHASES = PHASES - {"Indoor"}
+EYE_PHASES = PHASES
 INPUTS = {
     "01_empatica": "01_empatica_corrected_10sec.csv",
     "02_ucm": "02_ucm_10sec.csv",

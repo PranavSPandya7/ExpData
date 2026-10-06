@@ -30,8 +30,8 @@ OUT_HTML = str(OUTPUTS / '12_ucm_quality_report.html')
 
 PARTICIPANTS = None   # populated from key.csv and source roots in main()
 DEFAULT_UNCHECKED_PIDS = {1, 2, 3, 5, 6, 7, 18}
-PHASES       = ["BikeU", "WalkU", "BikeG", "WalkG", "Tram"]
-REPORT_PHASES = ["BikeU", "WalkU", "BikeG", "WalkG", "Tram"]
+PHASES       = ["BikeU", "WalkU", "BikeG", "WalkG", "Tram", "Indoor"]
+REPORT_PHASES = ["BikeU", "WalkU", "BikeG", "WalkG", "Tram", "Indoor"]
 EXCLUDED_NOTE_PHASES = set()
 EXCLUDED_NOTE_TEXT = ""
 

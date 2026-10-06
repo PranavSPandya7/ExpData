@@ -1,7 +1,10 @@
 """Atmo/LYS build: merge four sensors and align minute readings to the 10-sec index."""
 
+from __future__ import annotations
+
 import warnings; warnings.filterwarnings("default")
 from datetime import datetime
+
 from pathlib import Path
 import sys
 

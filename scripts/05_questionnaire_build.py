@@ -22,12 +22,12 @@ RECURRING_PATH = RAW_DIR / "Recurring questionnaire.csv"
 
 SCORED_PATH = OUT_DIR / "05_questionnaires_merged_scored.csv"
 
-# PhaseID mapping: underscore format (from questionnaire) -> no-underscore (matches index/other sensors)
+# PhaseID mapping: questionnaire labels to the phase names used by the index and sensor outputs.
 PHASEID_TO_INDEX = {
     'Walk_U': 'WalkU', 'Bike_U': 'BikeU',
     'Walk_G': 'WalkG', 'Bike_G': 'BikeG',
     'Tram': 'Tram',
-    'Base': 'Base', 'Indoor': 'Indoor', 'Reststop': 'Reststop',
+    'Base': 'Indoor', 'Indoor': 'Indoor', 'Reststop': 'Reststop',
 }
 
 # ============================================================
@@ -334,8 +334,8 @@ def prepare_recurring_raw() -> pd.DataFrame:
     rq = rq.sort_values(["participant_id", "_ts"]).copy()
     rq["response_index_within_participant"] = rq.groupby("participant_id").cumcount() + 1
 
-    # Questionnaires are ordinal: first response is baseline, then one response
-    # after each phase in the participant-specific key.csv chronological order.
+    # The source form labels its Indoor response as Base; later responses follow
+    # the five route phases in the participant-specific key.csv chronological order.
     # Apply the same rule to every participant; no participant-specific overrides.
     phase_order = load_phase_order(KEY_CSV)
 
@@ -343,7 +343,7 @@ def prepare_recurring_raw() -> pd.DataFrame:
         pid = "P" + str(row["participant_id"])
         idx = int(row["response_index_within_participant"])
         if idx == 1:
-            return "Base"
+            return "Indoor"
         phases = phase_order.get(pid)
         if not phases:
             return pd.NA

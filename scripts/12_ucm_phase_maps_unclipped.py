@@ -14,7 +14,7 @@ from _paths import KEY_FILE as KEY_CSV, OUTPUTS, RAW_UCM_DIR, load_key_unique
 
 UCM_ROOT = RAW_UCM_DIR
 OUT_DIR = OUTPUTS / "12_ucm_phase_maps_unclipped"
-PHASES = ["BikeU", "WalkU", "BikeG", "WalkG", "Tram"]
+PHASES = ["BikeU", "WalkU", "BikeG", "WalkG", "Tram", "Indoor"]
 # P1 map-only fallback: P1 lacks reliable per-phase UCM GPS after quality
 # filtering, so this validation map uses documented phase windows instead.
 P1_FALLBACK_WINDOWS = {

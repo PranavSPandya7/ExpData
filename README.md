@@ -2,6 +2,8 @@
 
 This is the active Paper 3 processing pipeline. It stages raw files from Final Data, builds 10-second sensor outputs, validates those outputs, and merges them for analysis.
 
+The six keyed phases are `BikeU`, `WalkU`, `BikeG`, `WalkG`, `Tram`, and `Indoor`. Continuous recordings also have `reststop` labels for gaps between keyed phases.
+
 `README.md` is the current explanation. `PIPELINE_EXPLANATION.md` is older context and may be stale.
 
 ## Authoritative Paths
@@ -67,7 +69,7 @@ Run `00_rawdata_collect.py` first. It collects Final Data into the staged rawdat
 - `00_index_build.py`
   - Reads `output\key.csv`. This is UTC timezone
   - Writes `output\00_index_10sec.csv`. Adds 2 hour to become Brussel local time.
-  - Creates the canonical 10-second participant-phase timeline used by all sensor outputs.
+  - Creates the canonical 10-second participant-phase timeline from all six keyed phase windows; gaps between windows are labelled `reststop`.
 
 ### Sensor builds
 
@@ -96,7 +98,7 @@ Run `00_rawdata_collect.py` first. It collects Final Data into the staged rawdat
   - Builds one Atmotube + LYS 10-second table because these sensors describe the same environmental exposure timeline.
 
 - `04_eyetracker_build.py`
-  - Reads Neon exports from `rawdata\04_eyetracker\Pxx_Phase`.
+  - Reads available Neon exports from `rawdata\04_eyetracker\Pxx_Phase`, including Indoor if an Indoor source export exists.
   - Required source files are `gaze_positions.csv`, `3d_eye_states.csv`, `fixations.csv`, `saccades.csv`, and `blinks.csv`.
   - Writes one per-phase intermediate `rawdata\04_eyetracker\Pxx_Phase\output.csv`.
   - Writes the combined output `04_eyetracker_10sec.csv`.
@@ -106,13 +108,15 @@ Run `00_rawdata_collect.py` first. It collects Final Data into the staged rawdat
   - Reads the three staged questionnaire CSVs from `rawdata\05_questionnaire`.
   - Writes `05_questionnaires_merged_scored.csv`.
   - Standardizes participant/phase labels and scores STAI, PRS, comfort, clothing, and related variables.
+  - The source form labels its Indoor response `Base`; this script writes that response with `PhaseID=Indoor`, followed by responses for the five route phases.
 
 - `06_all_merge.py`
   - Reads `00_index_10sec.csv` and the outputs from scripts `01` to `05`.
   - Writes `mergeddata_all.csv`.
   - Writes `merged_all_11participants.csv`.
   - Left-merges sensor outputs to the canonical 10-second index and joins questionnaire values by participant-phase.
-  - Adds `pct_complete` when route geometry is available. Tram is time-based. If `rawdata\Experiment path\*.gpkg` files are missing, Bike/Walk `pct_complete` is skipped.
+  - Adds `pct_complete` for the four Bike/Walk route phases when their route geometry is available; Tram is time-based. Indoor has no route geometry and no route-completion percentage.
+  - Accepts older scored questionnaire files that label the Indoor response `Base` and maps that label to `Indoor`. The current questionnaire builder writes `Indoor` directly.
 
 ### UCM map and clipping scripts
 
@@ -237,6 +241,9 @@ These are under:
 - `tram_all_participants_unclipped_map.html`
   - Raw/unclipped Tram UCM map.
 
+- `indoor_all_participants_unclipped_map.html`
+  - Raw/unclipped Indoor UCM map.
+
 ### QC outputs
 
 - `QC_gap_missing_percent_by_column.csv`
@@ -290,6 +297,7 @@ These are under:
 ## Current Important Notes
 
 - P13 has no eyetracker source phase folders and is expected to be blank for eyetracker.
+- The current eyetracker source and staged data contain no `Pxx_Indoor` folders (0 of 18 participants); Indoor eye-tracker values will remain missing unless those recordings become available.
 - Eyetracker staged files are flat under `rawdata\04_eyetracker\Pxx_Phase`.
 - There should not be staged `neon_player\exports\000` subfolders in `rawdata\04_eyetracker`.
 - Generated staged eyetracker `output.csv` files are build products, not manual source files.
