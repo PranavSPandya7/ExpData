@@ -18,6 +18,7 @@ OUT_INVALID = OUTPUTS / "QC_invalid_percent_by_column.csv"
 
 KEYS = ["ParticipantID", "PhaseID", "Datetime"]
 PHASES = {"BikeU", "WalkU", "BikeG", "WalkG", "Tram", "Indoor"}
+EYE_PHASES = PHASES - {"Indoor"}
 INPUTS = {
     "01_empatica": "01_empatica_corrected_10sec.csv",
     "02_ucm": "02_ucm_10sec.csv",
@@ -293,19 +294,25 @@ def scan_eyetracker_output(expected: dict[str, set[pd.Timestamp]], stats) -> Non
         print(f"WARNING: eyetracker output missing for QC: {path}")
         return
     df = pd.read_csv(path, low_memory=False, parse_dates=["Datetime"])
+    eye_expected = {pid: set(g.loc[g["PhaseID"].isin(EYE_PHASES), "Datetime"])
+                    for pid, g in pd.read_csv(INDEX_FILE, low_memory=False).groupby("ParticipantID")}
     df["ParticipantID"] = df["ParticipantID"].astype(str)
     for pid, g in df.groupby("ParticipantID"):
-        if pid not in expected:
+        if pid not in eye_expected:
             continue
         ts = pd.to_datetime(g["Datetime"], errors="coerce")
         for col in g.columns:
             if col in SKIP:
                 continue
-            add_bins(stats, pid, clean_col("04_eyetracker", col), "04_eyetracker", ts, g[col], expected)
+            add_bins(stats, pid, clean_col("04_eyetracker", col), "04_eyetracker", ts, g[col], eye_expected)
 
 
 def raw_missing_rows(idx: pd.DataFrame, participants: list[str]) -> list[dict]:
     expected = {pid: set(g["Datetime"]) for pid, g in idx.groupby("ParticipantID")}
+    sensor_expected = {"04_eyetracker": {
+        pid: set(g.loc[g["PhaseID"].isin(EYE_PHASES), "Datetime"])
+        for pid, g in idx.groupby("ParticipantID")
+    }}
     from collections import defaultdict
     stats = defaultdict(lambda: defaultdict(set))
     dmap = date_to_pid()
@@ -319,7 +326,9 @@ def raw_missing_rows(idx: pd.DataFrame, participants: list[str]) -> list[dict]:
     for col in cols:
         row = {"ColumnName": col}
         for pid in participants:
-            total = len(expected.get(pid, set()))
+            sensor = col.split("__", 1)[0]
+            denominator = sensor_expected.get(sensor, expected)
+            total = len(denominator.get(pid, set()))
             present = len(stats[pid].get(col, set()))
             row[pid] = round((total - present) / total * 100, 3) if total else ""
         rows.append(row)
