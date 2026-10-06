@@ -24,13 +24,14 @@ REPORT_HTML = OUTPUTS / "13_atmo_lys_quality_report.html"
 MAX_CONNECTED_GAP_SECONDS = 15
 DEFAULT_VISIBLE_PIDS = {f"P{p}" for p in [4, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]}
 
-PHASES = ["BikeU", "WalkU", "BikeG", "WalkG", "Tram", "reststop"]
+PHASES = ["BikeU", "WalkU", "BikeG", "WalkG", "Tram", "Indoor", "reststop"]
 PHASE_COLORS = {
     "BikeU": "#d45500",
     "WalkU": "#b8860b",
     "BikeG": "#1a6b1a",
     "WalkG": "#52b852",
     "Tram": "#7f8c8d",
+    "Indoor": "#34495e",
     "reststop": "#b0bec5",
 }
 

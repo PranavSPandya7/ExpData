@@ -7,6 +7,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from avro.datafile import DataFileReader
+from avro.io import DatumReader
 
 from _paths import KEY_FILE, OUTPUTS, RAW_DATA_DIR
 
@@ -270,32 +272,55 @@ def scan_raw_csv(path: Path, expected: dict[str, set[pd.Timestamp]], date_map: d
 
 
 def scan_empatica_names(expected: dict[str, set[pd.Timestamp]], date_map: dict[str, str], stats) -> None:
-    files = {}
     for path in (RAW_DATA_DIR / "01_empatica").rglob("*.avro"):
         pid = infer_pid(path, date_map)
-        m = re.search(r"_(\d+)\.avro$", path.name)
-        if pid and m:
-            files.setdefault(pid, []).append(int(m.group(1)))
-    for pid, starts in files.items():
-        present = set()
-        starts = sorted(set(starts))
-        for i, start_s in enumerate(starts):
-            start = pd.to_datetime(start_s, unit="s", utc=True).tz_convert("Europe/Brussels").tz_localize(None).floor("10s")
-            next_s = starts[i + 1] if i + 1 < len(starts) else start_s + 1800
-            end = pd.to_datetime(min(next_s, start_s + 1800), unit="s", utc=True).tz_convert("Europe/Brussels").tz_localize(None).floor("10s")
-            present.update({t for t in expected.get(pid, set()) if start <= t <= end})
+        if not pid:
+            continue
+        try:
+            with path.open("rb") as fh:
+                data = next(DataFileReader(fh, DatumReader()))
+        except Exception as exc:
+            print(f"WARNING: failed to read Empatica AVRO for QC: {path} ({exc})")
+            continue
+        raw = data.get("rawData", {})
+        channel_bins = {}
+
+        def bins_for(block, values_key="values", nanos=False):
+            if not block:
+                return set()
+            values = block.get(values_key, [])
+            if not values:
+                return set()
+            if nanos:
+                ts = pd.to_datetime(np.asarray(values, dtype=np.int64), unit="ns", utc=True)
+            else:
+                sf = float(block.get("samplingFrequency", 0) or 0)
+                if sf <= 0 or "timestampStart" not in block:
+                    return set()
+                us = block["timestampStart"] + np.arange(len(values)) * (1e6 / sf)
+                ts = pd.to_datetime(np.round(us).astype(np.int64), unit="us", utc=True)
+            return set(ts.tz_convert("Europe/Brussels").tz_localize(None).floor("10s"))
+
+        acc = bins_for(raw.get("accelerometer", {}), "x")
+        channel_bins.update({"accelerometer_x": acc, "accelerometer_y": acc, "accelerometer_z": acc})
+        channel_bins["bvp"] = bins_for(raw.get("bvp", {}))
+        channel_bins["eda"] = bins_for(raw.get("eda", {}))
+        channel_bins["steps"] = bins_for(raw.get("steps", {}))
+        channel_bins["systolicPeaks_peaksTimeNanos"] = bins_for(raw.get("systolicPeaks", {}), "peaksTimeNanos", True)
+        channel_bins["temperature"] = bins_for(raw.get("temperature", {}))
+        expected_pid = expected.get(pid, set())
         for col in EMPATICA_RAW_COLS:
-            stats[pid][clean_col("01_empatica", col)].update(present)
+            stats[pid][clean_col("01_empatica", col)].update(channel_bins.get(col, set()) & expected_pid)
 
 
-def scan_eyetracker_output(expected: dict[str, set[pd.Timestamp]], stats) -> None:
+def scan_eyetracker_output(idx: pd.DataFrame, stats) -> None:
     path = OUTPUTS / INPUTS["04_eyetracker"]
     if not path.exists():
         print(f"WARNING: eyetracker output missing for QC: {path}")
         return
     df = pd.read_csv(path, low_memory=False, parse_dates=["Datetime"])
     eye_expected = {pid: set(g.loc[g["PhaseID"].isin(EYE_PHASES), "Datetime"])
-                    for pid, g in pd.read_csv(INDEX_FILE, low_memory=False).groupby("ParticipantID")}
+                    for pid, g in idx.groupby("ParticipantID")}
     df["ParticipantID"] = df["ParticipantID"].astype(str)
     for pid, g in df.groupby("ParticipantID"):
         if pid not in eye_expected:
@@ -317,7 +342,7 @@ def raw_missing_rows(idx: pd.DataFrame, participants: list[str]) -> list[dict]:
     stats = defaultdict(lambda: defaultdict(set))
     dmap = date_to_pid()
     scan_empatica_names(expected, dmap, stats)
-    scan_eyetracker_output(expected, stats)
+    scan_eyetracker_output(idx, stats)
     for path in sorted(RAW_DATA_DIR.rglob("*")):
         if path.is_file() and path.suffix.lower() in {".csv", ".txt", ".tsv"}:
             scan_raw_csv(path, expected, dmap, stats)
