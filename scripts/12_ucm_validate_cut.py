@@ -6,8 +6,8 @@ For each requested phase (WalkG, BikeG):
   - One combined GPS map with coloured tracks per participant
   - Bookend photos (start/middle/end) per participant-phase
 
-Participant IDs and phase windows come from key.csv. UCM GPS tracks come from
-the built 10-sec UCM output; photo/bookend files come from Final Data UCM.
+Participant IDs and phase windows come from key.csv. UCM GPS comes from the
+built 10-sec output; photo/bookend files are searched under Final Data UCM.
 """
 
 import base64, html, io, re
@@ -26,10 +26,11 @@ UCM_10SEC_CSV = OUTPUTS / "02_ucm_10sec.csv"
 UCM_SOURCE_ROOTS = [
     ("Final Data UCM", FINAL_DATA / "ucm"),
 ]
-OUT_HTML = str(OUTPUTS / '12_ucm_quality_report.html')
+OUT_HTML = str(OUTPUTS / '12_ucm_quality_report_cut.html')
 
 PARTICIPANTS = None   # populated from key.csv and source roots in main()
-DEFAULT_UNCHECKED_PIDS = {1, 2, 3, 5, 6, 7, 18}
+BIKEU_CUT_WINDOWS = {} # pid -> (Cut_start, Cut_end), populated from key.csv
+DEFAULT_UNCHECKED_PIDS = {1, 2, 3}
 PHASES       = ["BikeU", "WalkU", "BikeG", "WalkG", "Tram"]
 REPORT_PHASES = ["BikeU", "WalkU", "BikeG", "WalkG", "Tram"]
 EXCLUDED_NOTE_PHASES = set()
@@ -161,10 +162,10 @@ def read_built_ucm_gps():
     df["GPS_time"] = pd.to_datetime(df["Datetime"], errors="coerce")
     df["GPS_lat"] = pd.to_numeric(df["GPS_lat"], errors="coerce")
     df["GPS_lon"] = pd.to_numeric(df["GPS_lon"], errors="coerce")
-    df["ParticipantNum"] = pd.to_numeric(
-        df["ParticipantID"].astype(str).str.extract(r"(\d+)", expand=False),
-        errors="coerce",
+    df["ParticipantNum"] = (
+        df["ParticipantID"].astype(str).str.extract(r"(\d+)", expand=False)
     )
+    df["ParticipantNum"] = pd.to_numeric(df["ParticipantNum"], errors="coerce")
     df = df.dropna(subset=["ParticipantNum", "PhaseID", "GPS_time", "GPS_lat", "GPS_lon"])
     df["ParticipantNum"] = df["ParticipantNum"].astype(int)
     df["PhaseID"] = df["PhaseID"].astype(str)
@@ -172,148 +173,19 @@ def read_built_ucm_gps():
 
 
 def find_built_gps_for_phase(ucm_df: pd.DataFrame, pid: int, phase: str,
-                             start_ts: datetime, end_ts: datetime):
+                             start_ts: datetime = None, end_ts: datetime = None):
     if ucm_df is None or len(ucm_df) == 0:
         return None
+    # 02_ucm_build.py has already clipped and labelled rows by participant/phase.
+    # Do not apply key.csv clock windows again here; built Datetime is on the
+    # UCM output clock and can be +2 h from the photo/key clock.
     mask = (ucm_df["ParticipantNum"] == int(pid)) & (ucm_df["PhaseID"] == phase)
     out = ucm_df.loc[mask, ["GPS_time", "GPS_lat", "GPS_lon"]].copy()
     if len(out) == 0:
         return None
     out = out.sort_values("GPS_time").reset_index(drop=True)
-    # Display-only retime: built UCM GPS can be on a +2h clock while photos/key
-    # are local experiment clock. Keep the cleaned route shape, align markers to key.
-    if len(out) >= 2:
-        rel = np.linspace(0, 1, len(out))
-        span = (pd.Timestamp(end_ts) - pd.Timestamp(start_ts)).total_seconds()
-        out["GPS_time"] = pd.Timestamp(start_ts) + pd.to_timedelta(rel * span, unit="s")
     out.attrs["source_csv"] = str(UCM_10SEC_CSV)
-    return out if len(out) >= 2 else None
-
-
-def read_data_csv(csv_path: Path):
-    """Read one raw UCM data.csv using its '# GPS_time,...' header."""
-    if not csv_path or not csv_path.exists() or is_duplicate_like_path(csv_path):
-        return None
-    try:
-        col_names = None
-        with csv_path.open("r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                stripped = line.lstrip("# ").strip()
-                if stripped.startswith("GPS_time"):
-                    col_names = [c.strip() for c in stripped.split(",")]
-                    break
-        if col_names is None:
-            return None
-        df = pd.read_csv(csv_path, comment="#", header=None, names=col_names, low_memory=False)
-        df["GPS_time"] = pd.to_datetime(df["GPS_time"], errors="coerce")
-        df["GPS_lat"] = pd.to_numeric(df.get("GPS_lat"), errors="coerce")
-        df["GPS_lon"] = pd.to_numeric(df.get("GPS_lon"), errors="coerce")
-        if "GPS_HDOP" in df.columns:
-            df["GPS_HDOP"] = pd.to_numeric(df["GPS_HDOP"], errors="coerce")
-        if "IO_flag" in df.columns:
-            df["IO_flag"] = pd.to_numeric(df["IO_flag"], errors="coerce")
-        df = df.dropna(subset=["GPS_time", "GPS_lat", "GPS_lon"])
-        return df.sort_values("GPS_time").reset_index(drop=True) if len(df) else None
-    except Exception:
-        return None
-
-
-def flag_bad_gps_points(df):
-    """Return True for GPS rows that should be excluded from map tracks."""
-    n = len(df)
-    bad = np.zeros(n, dtype=bool)
-
-    if "GPS_HDOP" in df.columns:
-        bad |= pd.to_numeric(df["GPS_HDOP"], errors="coerce").to_numpy() > 5
-    if "IO_flag" in df.columns:
-        bad |= pd.to_numeric(df["IO_flag"], errors="coerce").to_numpy() == 9
-
-    # Keep the step into a bad point out of the drawn route as well.
-    bad[1:] |= bad[:-1].copy()
-    return bad
-
-
-def kalman_smooth_gps(df: pd.DataFrame) -> pd.DataFrame:
-    """Constant-velocity Kalman smoothing for displayed GPS map tracks."""
-    if len(df) < 4:
-        return df
-
-    times = df["GPS_time"].values
-    lats = df["GPS_lat"].values.astype(float)
-    lons = df["GPS_lon"].values.astype(float)
-    n = len(lats)
-
-    dt_sec = np.diff(times.astype("datetime64[ms]").astype(np.float64)) / 1000.0
-    dt_sec = np.clip(dt_sec, 0.05, 60.0)
-
-    h = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=float)
-    r = np.eye(2) * 8e-9
-    sigma_a = 0.3 / 111_320
-
-    x = np.array([lats[0], lons[0], 0.0, 0.0], dtype=float)
-    p = np.diag([1e-8, 1e-8, 1e-6, 1e-6])
-    out_lat = np.empty(n)
-    out_lon = np.empty(n)
-    out_lat[0] = lats[0]
-    out_lon[0] = lons[0]
-
-    for i in range(1, n):
-        dt = dt_sec[i - 1]
-        f = np.array([[1, 0, dt, 0], [0, 1, 0, dt], [0, 0, 1, 0], [0, 0, 0, 1]], dtype=float)
-        sa2 = sigma_a ** 2
-        q = sa2 * np.array([
-            [dt**4 / 4, 0, dt**3 / 2, 0],
-            [0, dt**4 / 4, 0, dt**3 / 2],
-            [dt**3 / 2, 0, dt**2, 0],
-            [0, dt**3 / 2, 0, dt**2],
-        ])
-        x = f @ x
-        p = f @ p @ f.T + q
-        z = np.array([lats[i], lons[i]])
-        inn = z - h @ x
-        s = h @ p @ h.T + r
-        k = p @ h.T @ np.linalg.inv(s)
-        x = x + k @ inn
-        p = (np.eye(4) - k @ h) @ p
-        out_lat[i] = x[0]
-        out_lon[i] = x[1]
-
-    out = df.copy()
-    out["GPS_lat"] = out_lat
-    out["GPS_lon"] = out_lon
     return out
-
-
-def find_gps_for_phase(pdir: Path, phase: str, start_ts: datetime, end_ts: datetime):
-    """Return raw Final Data UCM GPS cropped to the key.csv phase window."""
-    candidates = []
-    for base in [pdir / phase / "ucm", pdir / "inputdata" / "ucm"]:
-        if not base.exists():
-            continue
-        direct = base / "data.csv"
-        if direct.exists():
-            candidates.append(direct)
-        candidates.extend(sorted(base.rglob("data.csv")))
-
-    best = None
-    best_n = 0
-    for csv_path in dict.fromkeys(p for p in candidates if not is_duplicate_like_path(p)):
-        df = read_data_csv(csv_path)
-        if df is None:
-            continue
-        mask = (df["GPS_time"] >= start_ts) & (df["GPS_time"] <= end_ts)
-        filtered = df.loc[mask].copy()
-        if filtered.empty:
-            continue
-        bad_mask = flag_bad_gps_points(filtered.reset_index(drop=True))
-        if bad_mask.any():
-            filtered = filtered.reset_index(drop=True).loc[~bad_mask].copy()
-        filtered = filtered[["GPS_time", "GPS_lat", "GPS_lon"]].dropna()
-        if len(filtered) > best_n:
-            best = kalman_smooth_gps(filtered.sort_values("GPS_time").reset_index(drop=True))
-            best.attrs["source_csv"] = str(csv_path)
-            best_n = len(best)
-    return best if best_n >= 2 else None
 
 
 def nearest_gps_point(df, target: datetime):
@@ -324,6 +196,83 @@ def nearest_gps_point(df, target: datetime):
     diffs = (df["GPS_time"] - target_ts).abs()
     idx = diffs.idxmin()
     return (df.loc[idx, "GPS_lat"], df.loc[idx, "GPS_lon"])
+
+
+def valid_time_text(value) -> bool:
+    text = str(value).strip()
+    return text not in ("", "-", "nan", "NaN", "None")
+
+
+def bikeu_cut_for_pid(pid: int):
+    cut = BIKEU_CUT_WINDOWS.get(pid)
+    if not cut:
+        return None
+    cut_start, cut_end = cut
+    if cut_start is None or cut_end is None or cut_end <= cut_start:
+        return None
+    return cut
+
+
+def apply_bikeu_cut_to_gps(pid: int, phase: str, gps: pd.DataFrame) -> pd.DataFrame:
+    if phase != "BikeU" or gps is None or len(gps) == 0:
+        return gps
+    cut = bikeu_cut_for_pid(pid)
+    if not cut:
+        out = gps.copy()
+        out["__segment"] = 1
+        return out
+    cut_start, cut_end = cut
+    gps_cut_start = cut_start + timedelta(hours=2)
+    gps_cut_end = cut_end + timedelta(hours=2)
+    out = gps.loc[(gps["GPS_time"] < gps_cut_start) | (gps["GPS_time"] > gps_cut_end)].copy()
+    if len(out) == 0:
+        return out
+    out["__segment"] = np.where(out["GPS_time"] < gps_cut_start, 1, 2)
+    return out.reset_index(drop=True)
+
+
+def gps_display_segments(df: pd.DataFrame):
+    if df is None or len(df) == 0:
+        return []
+    if "__segment" not in df.columns:
+        return [df]
+    segments = []
+    for _, seg_df in df.groupby("__segment", sort=True):
+        if len(seg_df) >= 2:
+            segments.append(seg_df.reset_index(drop=True))
+    return segments
+
+
+def matched_duration_minutes(pid: int, phase: str, start_ts: datetime, end_ts: datetime) -> float:
+    if phase == "BikeU":
+        cut = bikeu_cut_for_pid(pid)
+        if cut:
+            cut_start, cut_end = cut
+            part1 = max(0.0, (cut_start - start_ts).total_seconds())
+            part2 = max(0.0, (end_ts - cut_end).total_seconds())
+            return (part1 + part2) / 60.0
+    return (end_ts - start_ts).total_seconds() / 60.0
+
+
+def photo_targets_for_row(pid: int, phase: str, start_ts: datetime, end_ts: datetime):
+    if phase == "BikeU":
+        cut = bikeu_cut_for_pid(pid)
+        if cut:
+            cut_start, cut_end = cut
+            return [
+                ("BikeU start +0s", start_ts),
+                ("BikeU start +10s", start_ts + timedelta(seconds=10)),
+                ("Cut start -10s", cut_start - timedelta(seconds=10)),
+                ("Cut start +0s", cut_start),
+                ("Cut end +0s", cut_end),
+                ("Cut end +10s", cut_end + timedelta(seconds=10)),
+                ("BikeU end -10s", end_ts - timedelta(seconds=10)),
+                ("BikeU end +0s", end_ts),
+            ]
+    return (
+        [(f"S+{o}s", start_ts + timedelta(seconds=o)) for o in START_OFFSETS] +
+        [(f"E-{o}s" if o > 0 else "E+0s", end_ts - timedelta(seconds=o)) for o in END_OFFSETS]
+    )
 
 
 
@@ -378,32 +327,45 @@ def make_combined_map_html(gps_per_pid: dict, height: int, phase: str, source_ke
         pid_colors_used[pid] = color
         show_track = pid not in DEFAULT_UNCHECKED_PIDS
         fg = folium.FeatureGroup(name=f"P{pid}", show=show_track)
-        coords = list(zip(df["GPS_lat"], df["GPS_lon"]))
-        pl = folium.PolyLine(coords, color=color, weight=3, opacity=0.85)
-        pl.add_to(fg)
-        pl_name = pl.get_name()
-        # Build subsampled JS array for hover tooltip (max ~500 pts)
-        _step = max(1, len(df) // 500)
-        _pts = []
-        for _, _r in df.iloc[::_step].iterrows():
-            _tstr = pd.Timestamp(_r["GPS_time"]).strftime("%H:%M:%S")
-            _pts.append(f'[{_r["GPS_lat"]:.6f},{_r["GPS_lon"]:.6f},"{_tstr}"]')
-        hover_tracks_js.append(f'var _t_{pl_name}=[{",".join(_pts)}];')
-        hover_events_js.append((pl_name, f"P{pid}", color))
-        folium.CircleMarker(location=coords[0], radius=5, color=color,
+        display_segments = gps_display_segments(df)
+        if not display_segments:
+            continue
+        all_coords = []
+        for seg_i, seg_df in enumerate(display_segments, start=1):
+            coords = list(zip(seg_df["GPS_lat"], seg_df["GPS_lon"]))
+            if len(coords) < 2:
+                continue
+            all_coords.extend(coords)
+            tooltip_suffix = f" segment {seg_i}" if len(display_segments) > 1 else ""
+            pl = folium.PolyLine(coords, color=color, weight=3, opacity=0.85,
+                                 tooltip=f"P{pid}{tooltip_suffix}")
+            pl.add_to(fg)
+            pl_name = pl.get_name()
+            # Build subsampled JS array for hover tooltip (max ~500 pts)
+            _step = max(1, len(seg_df) // 500)
+            _pts = []
+            for _, _r in seg_df.iloc[::_step].iterrows():
+                _tstr = pd.Timestamp(_r["GPS_time"]).strftime("%H:%M:%S")
+                _pts.append(f'[{_r["GPS_lat"]:.6f},{_r["GPS_lon"]:.6f},"{_tstr}"]')
+            hover_tracks_js.append(f'var _t_{pl_name}=[{",".join(_pts)}];')
+            hover_events_js.append((pl_name, f"P{pid}", color))
+        if not all_coords:
+            continue
+        folium.CircleMarker(location=all_coords[0], radius=5, color=color,
                             fill=True, fill_color=color, fill_opacity=1.0,
                             tooltip=f"P{pid} start").add_to(fg)
-        folium.CircleMarker(location=coords[-1], radius=5, color=color,
+        folium.CircleMarker(location=all_coords[-1], radius=5, color=color,
                             fill=True, fill_color="#fff", fill_opacity=1.0,
                             tooltip=f"P{pid} end").add_to(fg)
 
         # ── Numbered photo markers ─────────────────────────────────────────
         if photo_times_per_pid and pid in photo_times_per_pid:
+            marker_cutover = 4 if phase == "BikeU" and bikeu_cut_for_pid(pid) else 3
             for num, (label, target_ts) in enumerate(photo_times_per_pid[pid], start=1):
                 pos = nearest_gps_point(df, target_ts)
                 if pos is None:
                     continue
-                bg = "#27ae60" if num <= 3 else "#e74c3c"
+                bg = "#27ae60" if num <= marker_cutover else "#e74c3c"
                 folium.Marker(
                     location=pos,
                     icon=folium.DivIcon(
@@ -596,10 +558,8 @@ def render_participant_row(pid: int, phase: str, source_key: str, start_ts: date
     color = PARTICIPANT_COLORS.get(f"P{pid}", "#888")
     row_style = ' style="display:none"' if pid in DEFAULT_UNCHECKED_PIDS else ''
 
-    targets = (
-        [(f"S+{o}s", start_ts + timedelta(seconds=o)) for o in START_OFFSETS] +
-        [(f"E-{o}s" if o > 0 else "E+0s", end_ts - timedelta(seconds=o)) for o in END_OFFSETS]
-    )
+    targets = photo_targets_for_row(pid, phase, start_ts, end_ts)
+    group_cutover = 4 if phase == "BikeU" and bikeu_cut_for_pid(pid) else 3
 
     # Narrow time window for speed
     window_photos = [
@@ -609,7 +569,7 @@ def render_participant_row(pid: int, phase: str, source_key: str, start_ts: date
 
     cards = []
     for i, (label, target) in enumerate(targets):
-        group = "start-group" if i < 3 else "end-group"
+        group = "start-group" if i < group_cutover else "end-group"
         res = nearest_photo(window_photos, target)
         if res is None:
             # Fallback: search ALL photos for this participant (any phase folder)
@@ -635,7 +595,8 @@ def render_participant_row(pid: int, phase: str, source_key: str, start_ts: date
                 f'</div>'
             )
 
-    dur = round((end_ts - start_ts).total_seconds() / 60, 1)
+    dur = round(matched_duration_minutes(pid, phase, start_ts, end_ts), 1)
+    grid_cols = len(targets)
     return (
         f'<div class="p-row" data-source="{source_key}" data-phase="{phase}" data-pid="P{pid}"{row_style}>'
         f'<div class="p-label" style="border-left:5px solid {color};background:{color}18">'
@@ -643,7 +604,7 @@ def render_participant_row(pid: int, phase: str, source_key: str, start_ts: date
         f'  <span class="p-time">{start_ts.strftime("%H:%M")}–{end_ts.strftime("%H:%M")}'
         f'  ({dur}m)</span>'
         f'</div>'
-        f'<div class="photo-grid">{"".join(cards)}</div>'
+        f'<div class="photo-grid" style="grid-template-columns:repeat({grid_cols},1fr)">{"".join(cards)}</div>'
         f'</div>'
     )
 
@@ -651,6 +612,8 @@ def render_participant_row(pid: int, phase: str, source_key: str, start_ts: date
 # ── KEY CSV ───────────────────────────────────────────────────────────────────
 
 def read_key():
+    global BIKEU_CUT_WINDOWS
+    BIKEU_CUT_WINDOWS = {}
     df = load_key_unique(KEY_CSV)
     result = {}
     for _, row in df.iterrows():
@@ -659,6 +622,17 @@ def read_key():
         except (ValueError, KeyError):
             continue
         date = parse_date(str(row["Date"]))
+        if "Cut_start" in row and "Cut_end" in row:
+            cut_start_raw = str(row["Cut_start"]).strip()
+            cut_end_raw = str(row["Cut_end"]).strip()
+            if valid_time_text(cut_start_raw) and valid_time_text(cut_end_raw):
+                try:
+                    cut_start = datetime.combine(date, datetime.strptime(cut_start_raw, "%H:%M:%S").time())
+                    cut_end = datetime.combine(date, datetime.strptime(cut_end_raw, "%H:%M:%S").time())
+                    if cut_end > cut_start:
+                        BIKEU_CUT_WINDOWS[pid] = (cut_start, cut_end)
+                except Exception:
+                    pass
         phases = {}
         for ph in PHASES:
             sc, ec = f"{ph}_start", f"{ph}_end"
@@ -728,15 +702,19 @@ def build_html(phase_sections: list) -> str:
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Phase Bookend Report</title>
+  <title>Matched UCM Phase Bookend Report</title>
   <style>{css}</style>
 </head>
 <body>
   <h1>UCM Phase Bookend Validation — First 3 &amp; Last 3 Photos · Grouped by Source Folder</h1>
   <div class="method-note">
-    <b>Method note:</b> GPS tracks are read from the built UCM output
-    <code>{html.escape(str(UCM_10SEC_CSV))}</code>. Photo/bookend rows are read from the Final Data UCM source folder printed below,
-    using <code>{html.escape(str(KEY_CSV))}</code> phase windows.
+    <b>Method note:</b> GPS tracks are read from the built 10-second UCM output
+    <code>{html.escape(str(UCM_10SEC_CSV))}</code>, generated by <code>02_ucm_build.py</code>.
+    Photo/bookend rows are read from the Final Data UCM source folder printed below and clipped to
+    <code>{html.escape(str(KEY_CSV))}</code>. No raw UCM source GPS is re-read for map tracks in this validator.
+    In this matched report, BikeU GPS tracks use two visible segments per participant when Cut_start/Cut_end exist:
+    BikeU_start to Cut_start and Cut_end to BikeU_end. GPS between Cut_start and Cut_end is hidden,
+    and BikeU duration/photo rows use only the two visible BikeU segments.
   </div>
   {"".join(phase_sections)}
 </body>
@@ -749,6 +727,9 @@ def main():
     global PARTICIPANTS
 
     key_data = read_key()
+    built_ucm_gps = read_built_ucm_gps()
+    print(f"  Built UCM GPS source: {UCM_10SEC_CSV}")
+    print(f"  Built UCM GPS rows with coordinates: {len(built_ucm_gps):,}")
 
     observed_participants = set()
     for _, source_root in UCM_SOURCE_ROOTS:
@@ -761,9 +742,6 @@ def main():
     if not PARTICIPANTS:
         print("  No key participants found; nothing to render.")
         return
-
-    built_ucm_gps = read_built_ucm_gps()
-    print(f"  Built UCM GPS rows with coordinates: {len(built_ucm_gps):,}")
 
     source_sections = []
     for source_i, (source_label, source_root) in enumerate(UCM_SOURCE_ROOTS, start=1):
@@ -800,14 +778,12 @@ def main():
                     continue
                 start_ts, end_ts = phase_window
                 gps = find_built_gps_for_phase(built_ucm_gps, pid, phase, start_ts, end_ts)
+                gps = apply_bikeu_cut_to_gps(pid, phase, gps)
                 if gps is None or len(gps) == 0:
                     continue
                 gps_per_pid[pid] = gps
-                photo_times_per_pid[pid] = (
-                    [(f"S+{o}s", start_ts + timedelta(seconds=o)) for o in START_OFFSETS] +
-                    [(f"E-{o}s" if o > 0 else "E+0s", end_ts - timedelta(seconds=o))
-                     for o in END_OFFSETS]
-                )
+                photo_times_per_pid[pid] = photo_targets_for_row(pid, phase, start_ts, end_ts)
+
             map_html = make_combined_map_html(
                 gps_per_pid,
                 MAP_HEIGHT,
@@ -832,7 +808,7 @@ def main():
                     all_photos_by_pid.get(pid, []),
                 )
                 rows_html.append(row)
-                gps_note = "" if pid in gps_per_pid else " (no built GPS track)"
+                gps_note = "" if pid in gps_per_pid else " (no processed GPS track)"
                 photo_note = "" if all_photos_by_pid.get(pid) else " (no photos found in source)"
                 print(f"    P{pid} OK{gps_note}{photo_note}")
 

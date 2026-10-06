@@ -1,15 +1,19 @@
 from __future__ import annotations
 
-import re, uuid, shutil
+import re, uuid
 from pathlib import Path
 import numpy as np
 import pandas as pd
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _paths import KEY_FILE, OUTPUTS, QUEST_SOURCE, RAW_QUEST_DIR, assert_sensor_folder_clean, load_key_unique
 
 # ── Paths ──
-SOURCE_CPW = Path(r'C:\Users\pandya\OneDrive - UCL\Field experiment raw data\Complete Participantwise data\Questionnaire')
-RAW_DIR    = Path(r'C:\Users\pandya\Documents\Github\docker\rawdata\05_questionnaire')
-OUT_DIR    = Path(r'C:\Users\pandya\Documents\Github\docker\ExpData\outputs')
-KEY_CSV    = Path(r'C:\Users\pandya\Documents\Github\docker\ExpData\metadata\key.csv')
+SOURCE_CPW = QUEST_SOURCE
+RAW_DIR    = RAW_QUEST_DIR
+OUT_DIR    = OUTPUTS
+KEY_CSV    = KEY_FILE
 
 BACKGROUND_PATH = RAW_DIR / "Background questionnaire.csv"
 CLOTHING_PATH = RAW_DIR / "Clothing.csv"
@@ -22,7 +26,7 @@ PHASEID_TO_INDEX = {
     'Walk_U': 'WalkU', 'Bike_U': 'BikeU',
     'Walk_G': 'WalkG', 'Bike_G': 'BikeG',
     'Tram': 'Tram',
-    'Indoor': 'Indoor', 'Reststop': 'Reststop',
+    'Base': 'Base', 'Indoor': 'Indoor', 'Reststop': 'Reststop',
 }
 
 # ============================================================
@@ -136,7 +140,7 @@ def load_phase_windows(key_csv: Path) -> dict[str, list[tuple[str, pd.Timestamp,
     """Build {participant_id_str: [(phase, start_dt, end_dt), ...]} from key.csv.
     Phase windows are shifted to Brussels local time (+2h) to match questionnaire timestamps.
     Windows are sorted chronologically by start time."""
-    key = pd.read_csv(key_csv)
+    key = load_key_unique(key_csv)
     windows: dict[str, list[tuple[str, pd.Timestamp, pd.Timestamp]]] = {}
     PHASE_NAMES = ['BikeU', 'WalkU', 'BikeG', 'WalkG', 'Tram']
     for _, row in key.iterrows():
@@ -158,35 +162,12 @@ def load_phase_windows(key_csv: Path) -> dict[str, list[tuple[str, pd.Timestamp,
     return windows
 
 
-def assign_phase_by_key(ts: pd.Timestamp, pid: str,
-                        phase_windows: dict) -> str | pd.NA:
-    """Match a questionnaire timestamp to a participant's phase window.
-    Key times were shifted to local time already. If timestamp is between
-    two phases, assign to the one that just ended. Before first = Indoor."""
-    if pd.isna(ts):
-        return pd.NA
-    pw = phase_windows.get(pid)
-    if not pw:
-        return pd.NA
-    # Check within-window first
-    for ph, start, end in pw:
-        if start <= ts <= end:
-            return ph
-    # Before first phase -> Indoor
-    if ts < pw[0][1]:
-        return 'Indoor'
-    # Between phases — assign to the one that just ended
-    for idx in range(len(pw)):
-        ph, _, end = pw[idx]
-        if idx + 1 < len(pw):
-            _, next_start, _ = pw[idx + 1]
-            if end < ts < next_start:
-                return ph
-        else:
-            # After last phase -> still assign to last phase
-            if ts > end:
-                return ph
-    return pd.NA
+def load_phase_order(key_csv: Path) -> dict[str, list[str]]:
+    """Build {participant_id_str: [phase, ...]} ordered by key.csv phase start time."""
+    return {
+        pid: [phase for phase, _, _ in windows]
+        for pid, windows in load_phase_windows(key_csv).items()
+    }
 
 
 def normalize_participant_id(value: object) -> str | pd.NA:
@@ -352,10 +333,25 @@ def prepare_recurring_raw() -> pd.DataFrame:
     rq["_ts"] = rq["Timestamp"].apply(parse_mixed_timestamp)
     rq = rq.sort_values(["participant_id", "_ts"]).copy()
     rq["response_index_within_participant"] = rq.groupby("participant_id").cumcount() + 1
-    # Load key.csv phase windows for per-participant phase assignment
-    _pw = load_phase_windows(KEY_CSV)
-    rq["PhaseID"] = rq.apply(lambda r: assign_phase_by_key(r["_ts"],
-                             "P" + str(r["participant_id"]), _pw), axis=1)
+
+    # Questionnaires are ordinal: first response is baseline, then one response
+    # after each phase in the participant-specific key.csv phase order.
+    phase_order = load_phase_order(KEY_CSV)
+
+    def assign_phase_by_response_order(row: pd.Series) -> str | pd.NA:
+        pid = "P" + str(row["participant_id"])
+        idx = int(row["response_index_within_participant"])
+        if idx == 1:
+            return "Base"
+        phases = phase_order.get(pid)
+        if not phases:
+            return pd.NA
+        phase_idx = idx - 2
+        if 0 <= phase_idx < len(phases):
+            return phases[phase_idx]
+        return pd.NA
+
+    rq["PhaseID"] = rq.apply(assign_phase_by_response_order, axis=1)
     rq = ensure_columns(rq, RECURRING_RAW_COLUMNS)
     raw = rq.loc[
         :,
@@ -452,13 +448,15 @@ def score_recurring(raw_recurring: pd.DataFrame) -> pd.DataFrame:
     # --- Keep ONLY the aggregate columns in output ---
     # Add ParticipantID in 'P2' format and normalize PhaseID to index convention
     scored["ParticipantID"] = "P" + scored["participant_id"].astype(str)
-    scored["PhaseID"] = scored["PhaseID"].map(PHASEID_TO_INDEX).fillna(scored["PhaseID"])
+    phase_mapped = scored["PhaseID"].map(PHASEID_TO_INDEX)
+    scored["PhaseID"] = phase_mapped.where(phase_mapped.notna(), scored["PhaseID"])
 
     output_cols = [
         "ParticipantID", "participant_id", "response_index_within_participant", "PhaseID",
         "current_comfort_1_7",
         "space_familiarity_1_5",
         "pleasantness_1_5",
+        "thermal_comfort_1_5",
         "environmental_comfort_mean_1_5",
         "stai6_mean_1_5",
         "prs11_fascination_mean_1_5",
@@ -482,12 +480,10 @@ def merge_tables(recurring_table: pd.DataFrame, clothing: pd.DataFrame,
 # ============================================================
 
 def generate_outputs() -> dict[str, str | int]:
-    # Collect: CPW -> rawdata/questionnaire/
     RAW_DIR.mkdir(parents=True, exist_ok=True)
-    for f in SOURCE_CPW.glob('*.csv'):
-        dst = RAW_DIR / f.name
-        if not dst.exists():
-            shutil.copy2(f, dst)
+    assert_sensor_folder_clean("questionnaire", RAW_DIR)
+    if not BACKGROUND_PATH.exists() or not CLOTHING_PATH.exists() or not RECURRING_PATH.exists():
+        raise FileNotFoundError(f"Expected staged questionnaire CSVs in {RAW_DIR}")
     
     background = load_background()
     clothing = load_clothing()
@@ -495,7 +491,7 @@ def generate_outputs() -> dict[str, str | int]:
     recurring_scored = score_recurring(recurring_raw)
 
     # Filter to key participants only (key has int IDs, recurring has string IDs)
-    key = pd.read_csv(KEY_CSV)
+    key = load_key_unique(KEY_CSV)
     valid_pids = set(key['Participant_ID'].dropna().astype(int).astype(str).unique())
     before = len(recurring_scored)
     recurring_scored = recurring_scored[recurring_scored['participant_id'].isin(valid_pids)].copy()
