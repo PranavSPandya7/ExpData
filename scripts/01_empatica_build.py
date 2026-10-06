@@ -261,7 +261,14 @@ for pid in sorted(clip_windows):
     if not raw10.empty:
         out = out.merge(raw10.reset_index().rename(columns={'index': 'Datetime'}), on='Datetime', how='left')
     if not met_df.empty:
-        out = out.merge(met_df, on='Datetime', how='left')
+        # MET is recorded once per minute; retain that observed minute value for
+        # each of its six 10-second bins without carrying it into another minute.
+        met_minute = (
+            met_df.assign(_met_minute=met_df['Datetime'].dt.floor('min'))
+            .groupby('_met_minute', as_index=False)['empatica__met'].median()
+        )
+        out['_met_minute'] = out['Datetime'].dt.floor('min')
+        out = out.merge(met_minute, on='_met_minute', how='left').drop(columns='_met_minute')
     for seg_pid, seg_start, seg_end, phase_name in labeled_segments:
         if seg_pid != pid:
             continue
@@ -354,7 +361,7 @@ MIN_VALID_RRI_FOR_RMSSD = 8
 MIN_VALID_RRI_FOR_HRV = 40
 MAX_ARTIFACT_PCT_FOR_RMSSD = 25
 MAX_ARTIFACT_PCT_FOR_HRV = 25
-PHASES_TO_KEEP = ['BikeU', 'WalkU', 'BikeG', 'WalkG', 'Tram', 'reststop']
+PHASES_TO_KEEP = ['BikeU', 'WalkU', 'BikeG', 'WalkG', 'Tram', 'Indoor', 'reststop']
 FD_NK_MAP = {
     'HRV_LF': 'hrv_fd_lf',
     'HRV_HF': 'hrv_fd_hf',
@@ -375,6 +382,7 @@ FD_AUDIT_COLS = [
     'hrv_fd_5min_valid_span_seconds',
 ]
 FD_AUDIT_TIME_COLS = ['hrv_fd_5min_segment_start', 'hrv_fd_5min_segment_end']
+SKIP_HRV_CORRECTION = os.environ.get('EMPATICA_SKIP_HRV_CORRECTION', '0') == '1'
 
 
 def filter_rri_artifacts_keep_index(rri_vals: np.ndarray, threshold: float):
@@ -573,55 +581,60 @@ for col in FD_AUDIT_COLS:
 missing_phase_rows = []
 coverage_rows = []
 
-for pid in sorted(df['ParticipantID'].astype(str).unique()):
-    df_pid = df[df['ParticipantID'].astype(str) == pid].copy().sort_values('Datetime')
-    segment_id = (df_pid['PhaseID'] != df_pid['PhaseID'].shift()).cumsum()
-    for _, sub in df_pid.groupby(segment_id):
-        phase = str(sub['PhaseID'].iloc[0])
-        if phase not in PHASES_TO_KEEP:
-            continue
-        if (pid, phase) in phase_windows:
-            phase_start, phase_end = phase_windows[(pid, phase)]
-        else:
-            phase_start = sub['Datetime'].min()
-            phase_end = sub['Datetime'].max() + pd.Timedelta(seconds=10)
-        phase_start_naive = pd.Timestamp(phase_start).tz_localize(None) if pd.Timestamp(phase_start).tzinfo is not None else pd.Timestamp(phase_start)
-        phase_end_naive = pd.Timestamp(phase_end).tz_localize(None) if pd.Timestamp(phase_end).tzinfo is not None else pd.Timestamp(phase_end)
-        rri_seg = rri_native[
-            (rri_native['ParticipantID'] == pid)
-            & (rri_native['peak_time'] >= phase_start_naive)
-            & (rri_native['peak_time'] < phase_end_naive)
-        ].copy()
-        peak_times = pd.to_datetime(rri_seg['peak_time'])
-        rri_ms = rri_seg['rri_ms']
+if SKIP_HRV_CORRECTION:
+    print('Skipping Empatica HRV correction stage; HRV columns left missing/False.')
+else:
+    for pid in sorted(df['ParticipantID'].astype(str).unique()):
+        df_pid = df[df['ParticipantID'].astype(str) == pid].copy().sort_values('Datetime')
+        segment_id = (df_pid['PhaseID'] != df_pid['PhaseID'].shift()).cumsum()
+        for _, sub in df_pid.groupby(segment_id):
+            phase = str(sub['PhaseID'].iloc[0])
+            if phase not in PHASES_TO_KEEP:
+                continue
+            if (pid, phase) in phase_windows:
+                phase_start, phase_end = phase_windows[(pid, phase)]
+            else:
+                phase_start = sub['Datetime'].min()
+                phase_end = sub['Datetime'].max() + pd.Timedelta(seconds=10)
+            phase_start_naive = pd.Timestamp(phase_start).tz_localize(None) if pd.Timestamp(phase_start).tzinfo is not None else pd.Timestamp(phase_start)
+            phase_end_naive = pd.Timestamp(phase_end).tz_localize(None) if pd.Timestamp(phase_end).tzinfo is not None else pd.Timestamp(phase_end)
+            rri_seg = rri_native[
+                (rri_native['ParticipantID'] == pid)
+                & (rri_native['peak_time'] >= phase_start_naive)
+                & (rri_native['peak_time'] < phase_end_naive)
+            ].copy()
+            peak_times = pd.to_datetime(rri_seg['peak_time'])
+            rri_ms = rri_seg['rri_ms']
 
-        for row_i, t_center in zip(sub.index, sub['Datetime']):
-            df.loc[row_i, 'hrv_td_rmssd'] = compute_rmssd_for_row(
-                t_center,
-                phase_start_naive,
-                phase_end_naive,
-                peak_times,
-                rri_ms,
-            )
-            df.loc[row_i, 'hrv_td_sdnn'] = compute_sdnn_for_row(t_center, phase_start_naive, phase_end_naive, peak_times, rri_ms)
-
-        if phase != 'reststop':
-            has_fd = False
             for row_i, t_center in zip(sub.index, sub['Datetime']):
-                fd = compute_fd_for_row(t_center, phase_start_naive, phase_end_naive, peak_times, rri_ms)
-                if fd is None:
-                    continue
-                has_fd = True
-                for col in FD_OUTPUT_COLS + FD_AUDIT_COLS:
-                    df.loc[row_i, col] = fd.get(col, np.nan)
-            coverage_rows.append({'ParticipantID': pid, 'PhaseID': phase, 'available': int(has_fd)})
-            if not has_fd:
-                missing_phase_rows.append({'ParticipantID': pid, 'PhaseID': phase})
+                df.loc[row_i, 'hrv_td_rmssd'] = compute_rmssd_for_row(
+                    t_center,
+                    phase_start_naive,
+                    phase_end_naive,
+                    peak_times,
+                    rri_ms,
+                )
+                df.loc[row_i, 'hrv_td_sdnn'] = compute_sdnn_for_row(t_center, phase_start_naive, phase_end_naive, peak_times, rri_ms)
+
+            if phase not in {'reststop', 'Indoor'}:
+                has_fd = False
+                for row_i, t_center in zip(sub.index, sub['Datetime']):
+                    fd = compute_fd_for_row(t_center, phase_start_naive, phase_end_naive, peak_times, rri_ms)
+                    if fd is None:
+                        continue
+                    has_fd = True
+                    for col in FD_OUTPUT_COLS + FD_AUDIT_COLS:
+                        df.loc[row_i, col] = fd.get(col, np.nan)
+                coverage_rows.append({'ParticipantID': pid, 'PhaseID': phase, 'available': int(has_fd)})
+                if not has_fd:
+                    missing_phase_rows.append({'ParticipantID': pid, 'PhaseID': phase})
 
 if 'heart_rate' not in df.columns and 'empatica__pulse_rate_bpm' in df.columns:
     df['heart_rate'] = df['empatica__pulse_rate_bpm']
 Path(RESULTS_CSV).parent.mkdir(parents=True, exist_ok=True)
-df.to_csv(RESULTS_CSV, index=False, lineterminator='\n')
+_tmp_results_csv = Path(RESULTS_CSV).with_suffix('.tmp.csv')
+df.to_csv(_tmp_results_csv, index=False, lineterminator='\n')
+_tmp_results_csv.replace(RESULTS_CSV)
 print(f'Saved corrected Empatica output -> {RESULTS_CSV}')
 
 print(f'Row count: {len(df)}')
@@ -644,6 +657,9 @@ changed_signal_cols = [c for c in unchanged_signal_cols if c in base_df.columns 
 if changed_signal_cols:
     raise RuntimeError(f'Signal columns unexpectedly changed: {changed_signal_cols}')
 print('HR, EDA, temperature and accelerometer columns unchanged.')
-print('RMSSD uses fixed 30-second windows.')
-print('SDNN uses fixed 120-second windows.')
-print('LF, HF and LF/HF use rolling 300-second windows aligned to the 10-second grid.')
+if SKIP_HRV_CORRECTION:
+    print('HRV correction skipped; HRV columns are missing/False.')
+else:
+    print('RMSSD uses fixed 30-second windows.')
+    print('SDNN uses fixed 120-second windows.')
+    print('LF, HF and LF/HF use rolling 300-second windows aligned to the 10-second grid.')
