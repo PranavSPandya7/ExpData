@@ -9,7 +9,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _paths import KEY_FILE, OUTPUTS, QUEST_SOURCE, RAW_QUEST_DIR, assert_sensor_folder_clean, load_key_unique
 
-# ── Paths ──
+# -- Paths --
 SOURCE_CPW = QUEST_SOURCE
 RAW_DIR    = RAW_QUEST_DIR
 OUT_DIR    = OUTPUTS
@@ -30,7 +30,7 @@ PHASEID_TO_INDEX = {
 }
 
 # ============================================================
-# Column mappings — raw questionnaire text -> internal names
+# Column mappings - raw questionnaire text -> internal names
 # ============================================================
 BACKGROUND_COLUMNS = {
     "What is your name?": "background_name",
@@ -41,7 +41,7 @@ BACKGROUND_COLUMNS = {
     "How long have you been living in Brussels?": "background_years_in_brussels",
     "What do you normally use for vision correction?": "background_vision_correction",
     "How well do you know the streets and surroundings of Bois de la Cambre & Etterbeek station?":
-        "background_site_familiarity_1_7",
+        "background_site_familiarity_1_10",
     "What is the type of your residence?": "background_residence_type",
     "Do you have children?": "background_has_children",
     "How do you commute to work?": "background_commute_modes",
@@ -52,7 +52,6 @@ BACKGROUND_COLUMNS = {
     "Will you be bringing your own bicycle for experiment? \n\nNote: If you don't have a personal bike, "
     "bike will be provided. In this case, please select No so that we can arrange a bike for you.":
         "background_own_bike_for_experiment",
-    "Status": "background_status",
 }
 
 CLOTHING_COLUMNS = {
@@ -130,7 +129,7 @@ COMFORT_MAP_5 = {
 }
 
 # ============================================================
-# Phase schedule — built from key.csv (per-participant windows)
+# Phase schedule - built from key.csv (per-participant windows)
 # ============================================================
 # Belgium summer time offset: key.csv timestamps are in UTC,
 # questionnaire timestamps are in Brussels local time (CEST = UTC+2)
@@ -291,8 +290,8 @@ def load_background() -> pd.DataFrame:
     bg = ensure_columns(bg, BACKGROUND_COLUMNS)
     bg = bg.loc[bg["participant_id"].notna(),
                 ["participant_id", *BACKGROUND_COLUMNS.keys()]].rename(columns=BACKGROUND_COLUMNS)
-    bg["background_site_familiarity_1_7"] = pd.to_numeric(
-        bg["background_site_familiarity_1_7"], errors="coerce")
+    bg["background_site_familiarity_1_10"] = pd.to_numeric(
+        bg["background_site_familiarity_1_10"], errors="coerce")
     return bg
 
 
@@ -314,7 +313,7 @@ def load_clothing() -> pd.DataFrame:
         "Q2. What is your weight according to your most recent measurement? "
         "(Please specify the unit, e.g., kilograms or pounds.)"
     ].apply(parse_weight_kg)
-    cl["bmi_kg_m2"] = (cl["weight_kg"] / (cl["height_m"] ** 2)).round(2)
+    cl["bmi_kg_m2"] = (cl["weight_kg"] / (cl["height_m"] ** 2)).replace([np.inf, -np.inf], np.nan).round(2)
     cl["bmi_category_who"] = cl["bmi_kg_m2"].apply(bmi_category_who)
     cl = cl.loc[cl["participant_id"].notna(),
                 ["participant_id", *CLOTHING_COLUMNS.keys(),
@@ -329,13 +328,14 @@ def prepare_recurring_raw() -> pd.DataFrame:
     if pid_col is None:
         raise KeyError("Participant id column not found in recurring questionnaire.")
     rq["participant_id"] = rq[pid_col].apply(normalize_participant_id)
-    # Parse timestamp internally for phase assignment — NOT in output
+    # Parse timestamp internally for phase assignment - NOT in output
     rq["_ts"] = rq["Timestamp"].apply(parse_mixed_timestamp)
     rq = rq.sort_values(["participant_id", "_ts"]).copy()
     rq["response_index_within_participant"] = rq.groupby("participant_id").cumcount() + 1
 
     # Questionnaires are ordinal: first response is baseline, then one response
-    # after each phase in the participant-specific key.csv phase order.
+    # after each phase in the participant-specific key.csv chronological order.
+    # Apply the same rule to every participant; no participant-specific overrides.
     phase_order = load_phase_order(KEY_CSV)
 
     def assign_phase_by_response_order(row: pd.Series) -> str | pd.NA:
@@ -368,7 +368,7 @@ def prepare_recurring_raw() -> pd.DataFrame:
 def score_recurring(raw_recurring: pd.DataFrame) -> pd.DataFrame:
     """Convert raw text responses to numeric scores.
 
-    Returns ONLY the aggregate scored columns — no intermediate
+    Returns ONLY the aggregate scored columns - no intermediate
     individual-item columns or raw text, so the output is easy
     to interpret.
     """

@@ -6,7 +6,7 @@ Generates quality HTML report for Pupil Labs Neon eyetracker data.
 Reads:  Paper3_Github/output/04_eyetracker_10sec.csv (via _paths.py)
 Output: Paper3_Github/output/14_eyetracker_quality_report.html
 """
-import warnings; warnings.filterwarnings('ignore')
+import warnings; warnings.filterwarnings("default")
 import base64, io
 from datetime import datetime
 from pathlib import Path

@@ -53,6 +53,7 @@ SIGNAL_PLOTS = [
     ('PPG LF Power', 'hrv_fd_lf', '#6A1B9A'),
     ('PPG HF Power', 'hrv_fd_hf', '#AB47BC'),
     ('PPG LF/HF Ratio', 'hrv_fd_lf_hf_ratio', '#8E24AA'),
+    ('MET', 'empatica__met', '#795548'),
     ('Temp (\u00b0C)', 'temperature', '#FB8C00'),
     ('Acc |g|', 'vector_magnitude', '#43A047'),
 ]
@@ -82,7 +83,8 @@ def build_phase_windows(key):
                 e = pd.Timestamp(f"{date} {r[ec]}") + pd.Timedelta(hours=KEY_TO_DATA_OFFSET_HOURS)
                 if e < s: e += pd.Timedelta(days=1)
                 windows[(pid,ph)] = (s,e)
-            except: pass
+            except ValueError as ve:
+                print(f"Warning: Failed to parse {pid} {ph} phase timestamps: {ve}")
     return windows
 
 
@@ -120,11 +122,11 @@ def compute_quality_metrics(df_day, windows, pid, date_str):
     if 'hrv_fd_lf_hf_ratio' in df_day.columns:
         v = df_day['hrv_fd_lf_hf_ratio'].dropna()
         if len(v) > 0: m['lfhf_mean'] = round(v.mean(),2)
-    if 'rri_count_valid' in df_day.columns:
-        v = df_day['rri_count_valid'].dropna()
+    if 'hrv_fd_5min_valid_rri_count' in df_day.columns:
+        v = df_day['hrv_fd_5min_valid_rri_count'].dropna()
         if len(v) > 0: m['rri_valid_mean'] = round(v.mean(),1)
-    if 'rri_artifact_pct' in df_day.columns:
-        v = df_day['rri_artifact_pct'].dropna()
+    if 'hrv_fd_5min_removed_pct' in df_day.columns:
+        v = df_day['hrv_fd_5min_removed_pct'].dropna()
         if len(v) > 0: m['artifact_mean'] = round(v.mean(),1)
     if 'temperature' in df_day.columns:
         t_v = df_day['temperature'].dropna(); t_ph = t_v[(t_v>25)&(t_v<42)]
@@ -178,7 +180,18 @@ def make_participant_plot(df_day, windows, pid):
     for ax, (label, col, color) in zip(axes, pairs):
         series = pd.to_numeric(plot_df[col], errors='coerce')
         series_plot = series.to_numpy()
-        ax.plot(ts, series_plot, color=color, linewidth=0.7, alpha=0.85)
+        if col == 'empatica__met':
+            met_plot = pd.Series(series_plot, index=ts).ffill(limit=5)
+            ax.plot(
+                ts,
+                met_plot.to_numpy(),
+                color=color,
+                linewidth=0.7,
+                alpha=0.85,
+                drawstyle='steps-post',
+            )
+        else:
+            ax.plot(ts, series_plot, color=color, linewidth=0.7, alpha=0.85)
         ax.set_ylabel(label, fontsize=8)
         ax.tick_params(labelsize=7)
         ax.grid(True, alpha=0.3)
@@ -261,7 +274,7 @@ def generate_html(all_metrics, all_plots, generated_at):
                 phase_rows.append(f'<tr><td><span style="background:{ph_col};color:#fff;padding:2px 6px;border-radius:3px;font-size:0.85em">{ph_id}</span></td><td style="font-size:0.85em;color:#555">{win_str}</td><td>{dur_min} min</td><td>{pd_info.get("rows",0)}</td><td {_cell_bg(eda_c,70,40)}>{eda_c}% EDA valid</td><td {_cell_bg(hr_c,60,30)}>{hr_c}% HR valid</td></tr>')
         plot_html = ''
         if plot_b64:
-            plot_html = f'''<div class="card full-width"><h3>Full-Day Signal Time-Series</h3><p class="footnote" style="margin-bottom:8px">Shaded = experiment phases. Lines show available 10-sec values only; gaps are not interpolated in this report.</p><img src="data:image/png;base64,{plot_b64}" style="max-width:100%;border-radius:4px" /></div>'''
+            plot_html = f'''<div class="card full-width"><h3>Full-Day Signal Time-Series</h3><p class="footnote" style="margin-bottom:8px">Shaded = experiment phases. Lines show available values only. MET is the imported Empatica 1-minute digital biomarker and is shown as a 1-minute flat step line at available timestamps; it is not interpolated.</p><img src="data:image/png;base64,{plot_b64}" style="max-width:100%;border-radius:4px" /></div>'''
         participant_sections.append(f'''<div id="p{pid}" class="participant-card participant-section" data-pid="{pid_label}"{section_style}><div class="p-header" style="background:{sc}22;border-left:6px solid {sc}"><h2>P{pid}<span class="status-badge" style="background:{sc}">{st}</span><span class="meta">{m["total_rows"]} 10-sec rows &nbsp;|&nbsp; {m["date"]}</span></h2></div><div class="grid2"><div class="card"><h3>EDA</h3><table class="metrics"><tr><th>Coverage</th><td {_cell_bg(m["eda_coverage"],70,40)}>{fmt(m["eda_coverage"])}%</td></tr><tr><th>Zero readings</th><td {_cell_bg(m["eda_zero_pct"],10,30,False)}>{fmt(m["eda_zero_pct"])}%</td></tr><tr><th>Mean / Min / Max</th><td>{fmt(m["eda_mean"],3)} / {fmt(m["eda_min"],3)} / {fmt(m["eda_max"],3)} \u00b5S</td></tr></table></div><div class="card"><h3>Heart Rate &amp; HRV</h3><table class="metrics"><tr><th>HR coverage</th><td {_cell_bg(m["hr_coverage"],60,30)}>{fmt(m["hr_coverage"])}%</td></tr><tr><th>HR mean / min / max</th><td>{fmt(m["hr_mean"],1)} / {fmt(m["hr_min"],1)} / {fmt(m["hr_max"],1)} bpm</td></tr><tr><th>RMSSD</th><td>{fmt(m["hrv_mean"],1)} ms</td></tr><tr><th>SDNN</th><td>{fmt(m["sdnn_mean"],1)} ms</td></tr><tr><th>LF / HF / LF:HF</th><td>{fmt(m["lf_mean"],1)} / {fmt(m["hf_mean"],1)} / {fmt(m["lfhf_mean"],2)}</td></tr></table></div><div class="card"><h3>RRI Quality</h3><table class="metrics"><tr><th>Mean valid RRI count</th><td>{fmt(m["rri_valid_mean"],1)}</td></tr><tr><th>Mean artifact %</th><td>{fmt(m["artifact_mean"],1)}%</td></tr><tr><th>Temp coverage</th><td {_cell_bg(m["temp_coverage"],70,40)}>{fmt(m["temp_coverage"])}%</td></tr><tr><th>Skin temp mean</th><td>{fmt(m["temp_mean"],1)} \u00b0C</td></tr><tr><th>Acc coverage</th><td {_cell_bg(m["acc_coverage"],70,40)}>{fmt(m["acc_coverage"])}%</td></tr></table></div></div><div class="card full-width"><h3>Per-Phase Breakdown</h3><table class="phase-table"><thead><tr><th>Phase</th><th>Window (local)</th><th>Duration</th><th>10-sec rows</th><th>EDA coverage</th><th>HR coverage</th></tr></thead><tbody>{"".join(phase_rows)}</tbody></table></div>{plot_html}</div>''')
     html = f'''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Empatica Quality Report</title><style>
 *{{box-sizing:border-box;margin:0;padding:0}}

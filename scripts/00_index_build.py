@@ -1,5 +1,5 @@
-"""Build continuous 10-sec index — from first phase start to last phase end (includes gaps)."""
-import warnings; warnings.filterwarnings('ignore')
+"""Build continuous 10-sec index - from first phase start to last phase end (includes gaps)."""
+import warnings; warnings.filterwarnings("default")
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))

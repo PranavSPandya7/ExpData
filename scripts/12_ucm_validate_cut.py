@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 
-# ── CONFIG ────────────────────────────────────────────────────────────────────
+# -- CONFIG --------------------------------------------------------------------
 import sys; from pathlib import Path; sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _paths import FINAL_DATA, KEY_FILE as KEY_CSV, OUTPUTS, load_key_unique
 UCM_10SEC_CSV = OUTPUTS / "02_ucm_10sec.csv"
@@ -63,11 +63,10 @@ MONTH_MAP = {
 }
 YEAR   = 2025
 CAM_RE = re.compile(r"^cam_(\d{8})_(\d{6})(?:_\d+)?\.jpg$", re.IGNORECASE)
-DUPLICATE_PATH_TOKENS = (" copy", "- copy", "_copy", "backup", "old", "temp", "archive")
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
-# ── LOW-LEVEL HELPERS ─────────────────────────────────────────────────────────
+# -- LOW-LEVEL HELPERS ---------------------------------------------------------
 
 def parse_date(s: str) -> datetime:
     p = str(s).strip().split("-")
@@ -79,18 +78,9 @@ def ts_from_cam(name: str):
     return datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S") if m else None
 
 
-def is_duplicate_like_path(path: Path) -> bool:
-    return any(
-        any(token in part.lower() for token in DUPLICATE_PATH_TOKENS)
-        for part in path.parts
-    )
-
-
 def collect_cam_photos(cam_dir: Path):
     seen = {}
     for f in cam_dir.glob("cam_*.jpg"):
-        if is_duplicate_like_path(f):
-            continue
         ts = ts_from_cam(f.name)
         if ts is None:
             continue
@@ -292,14 +282,14 @@ def thumb_b64(fp: Path) -> str:
         return ''
 
 
-# ── MAP: combined all-participant view with toggle checkboxes ─────────────────
+# -- MAP: combined all-participant view with toggle checkboxes -----------------
 
 def make_combined_map_html(gps_per_pid: dict, height: int, phase: str, source_key: str,
                            photo_times_per_pid: dict = None) -> str:
     """
     One folium map with a coloured FeatureGroup per participant.
     A floating checkbox panel lets the user show/hide individual tracks instantly.
-    photo_times_per_pid: {pid: [(label, datetime), ...]} — 6 photo target times
+    photo_times_per_pid: {pid: [(label, datetime), ...]} - 6 photo target times
       whose nearest GPS points are drawn as numbered circles on the track.
     """
     all_lats, all_lons = [], []
@@ -358,7 +348,7 @@ def make_combined_map_html(gps_per_pid: dict, height: int, phase: str, source_ke
                             fill=True, fill_color="#fff", fill_opacity=1.0,
                             tooltip=f"P{pid} end").add_to(fg)
 
-        # ── Numbered photo markers ─────────────────────────────────────────
+        # -- Numbered photo markers -----------------------------------------
         if photo_times_per_pid and pid in photo_times_per_pid:
             marker_cutover = 4 if phase == "BikeU" and bikeu_cut_for_pid(pid) else 3
             for num, (label, target_ts) in enumerate(photo_times_per_pid[pid], start=1):
@@ -388,7 +378,7 @@ def make_combined_map_html(gps_per_pid: dict, height: int, phase: str, source_ke
     if not pid_varnames:
         return '<p style="color:#aaa;font-size:12px">No GPS data for this phase.</p>'
 
-    # ── Floating checkbox panel HTML ──────────────────────────────────────────
+    # -- Floating checkbox panel HTML ------------------------------------------
     cb_rows = ""
     for pid in sorted(pid_varnames.keys()):
         vn    = pid_varnames[pid]
@@ -421,7 +411,7 @@ def make_combined_map_html(gps_per_pid: dict, height: int, phase: str, source_ke
   {cb_rows}
 </div>'''
 
-    # ── Toggle JS ─────────────────────────────────────────────────────────────
+    # -- Toggle JS -------------------------------------------------------------
     # This script runs synchronously after all folium layer-creation scripts
     # (because it is add_child'd last), so all feature_group_xxx vars exist.
     # DOMContentLoaded fires after all synchronous scripts → safe to access them.
@@ -498,7 +488,7 @@ def make_combined_map_html(gps_per_pid: dict, height: int, phase: str, source_ke
     m.get_root().html.add_child(folium.Element(panel_html))
     m.get_root().html.add_child(folium.Element(toggle_js))
 
-    # ── Hover tooltip: participant ID + time follows mouse along each track ────
+    # -- Hover tooltip: participant ID + time follows mouse along each track ----
     if hover_events_js:
         track_decls = "\n  ".join(hover_tracks_js)
         ev_lines = []
@@ -551,7 +541,7 @@ def make_combined_map_html(gps_per_pid: dict, height: int, phase: str, source_ke
             f'style="border:1px solid #ccc;border-radius:6px;" frameborder="0"></iframe>')
 
 
-# ── PHOTO ROW: one participant, one phase ─────────────────────────────────────
+# -- PHOTO ROW: one participant, one phase -------------------------------------
 
 def render_participant_row(pid: int, phase: str, source_key: str, start_ts: datetime,
                            end_ts: datetime, all_photos: list) -> str:
@@ -609,7 +599,7 @@ def render_participant_row(pid: int, phase: str, source_key: str, start_ts: date
     )
 
 
-# ── KEY CSV ───────────────────────────────────────────────────────────────────
+# -- KEY CSV -------------------------------------------------------------------
 
 def read_key():
     global BIKEU_CUT_WINDOWS
@@ -651,7 +641,7 @@ def read_key():
     return result
 
 
-# ── HTML ASSEMBLY ─────────────────────────────────────────────────────────────
+# -- HTML ASSEMBLY -------------------------------------------------------------
 
 def build_html(phase_sections: list) -> str:
     css = """
@@ -706,7 +696,7 @@ def build_html(phase_sections: list) -> str:
   <style>{css}</style>
 </head>
 <body>
-  <h1>UCM Phase Bookend Validation — First 3 &amp; Last 3 Photos · Grouped by Source Folder</h1>
+  <h1>UCM Phase Bookend Validation - First 3 &amp; Last 3 Photos - Grouped by Source Folder</h1>
   <div class="method-note">
     <b>Method note:</b> GPS tracks are read from the built 10-second UCM output
     <code>{html.escape(str(UCM_10SEC_CSV))}</code>, generated by <code>02_ucm_build.py</code>.
@@ -721,7 +711,7 @@ def build_html(phase_sections: list) -> str:
 </html>"""
 
 
-# ── MAIN ──────────────────────────────────────────────────────────────────────
+# -- MAIN ----------------------------------------------------------------------
 
 def main():
     global PARTICIPANTS

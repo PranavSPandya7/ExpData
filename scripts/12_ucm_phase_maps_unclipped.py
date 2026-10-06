@@ -15,7 +15,8 @@ from _paths import KEY_FILE as KEY_CSV, OUTPUTS, RAW_UCM_DIR, load_key_unique
 UCM_ROOT = RAW_UCM_DIR
 OUT_DIR = OUTPUTS / "12_ucm_phase_maps_unclipped"
 PHASES = ["BikeU", "WalkU", "BikeG", "WalkG", "Tram"]
-DUPLICATE_PATH_TOKENS = (" copy", "- copy", "_copy", "backup", "old", "temp", "archive")
+# P1 map-only fallback: P1 lacks reliable per-phase UCM GPS after quality
+# filtering, so this validation map uses documented phase windows instead.
 P1_FALLBACK_WINDOWS = {
     "WalkU": ("2025-07-03 12:24:07", "2025-07-03 12:51:21"),
     "BikeU": ("2025-07-03 12:59:46", "2025-07-03 13:36:01"),
@@ -25,10 +26,9 @@ P1_FALLBACK_WINDOWS = {
 }
 
 MONTH_MAP = {
-    "jan": 1, "fév": 2, "fev": 2, "feb": 2, "mar": 3, "avr": 4, "apr": 4,
+    "jan": 1, "fev": 2, "feb": 2, "mar": 3, "avr": 4, "apr": 4,
     "mai": 5, "may": 5, "juin": 6, "jun": 6, "juil": 7, "jul": 7,
-    "août": 8, "aout": 8, "aug": 8, "sep": 9, "oct": 10, "nov": 11,
-    "déc": 12, "dec": 12,
+    "aout": 8, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
 }
 YEAR = 2025
 CAM_RE = re.compile(r"^cam_(\d{8})_(\d{6})(?:_\d+)?\.jpg$", re.IGNORECASE)
@@ -110,21 +110,12 @@ def camera_timestamp(path: Path) -> pd.Timestamp | None:
     return pd.to_datetime(match.group(1) + match.group(2), format="%Y%m%d%H%M%S", errors="coerce")
 
 
-def is_duplicate_like_path(path: Path) -> bool:
-    return any(
-        any(token in part.lower() for token in DUPLICATE_PATH_TOKENS)
-        for part in path.parts
-    )
-
-
 def infer_phase_window_from_photos(pdir: Path, phase: str) -> tuple[pd.Timestamp, pd.Timestamp] | None:
     phase_dir = pdir / phase
     if not phase_dir.exists():
         return None
     times = []
     for photo in phase_dir.rglob("cam_*.jpg"):
-        if is_duplicate_like_path(photo):
-            continue
         ts = camera_timestamp(photo)
         if ts is not None and not pd.isna(ts):
             times.append(ts)
@@ -156,16 +147,12 @@ def candidate_ucm_csvs(pdir: Path, phase: str) -> list[Path]:
     shared_candidates = []
     for pattern in phase_patterns:
         for path in pdir.glob(pattern):
-            if is_duplicate_like_path(path):
-                continue
             resolved = path.resolve()
             if resolved not in seen:
                 seen.add(resolved)
                 phase_candidates.append(path)
     for pattern in shared_patterns:
         for path in pdir.glob(pattern):
-            if is_duplicate_like_path(path):
-                continue
             resolved = path.resolve()
             if resolved not in seen:
                 seen.add(resolved)

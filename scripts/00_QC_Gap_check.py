@@ -246,14 +246,15 @@ def add_bins(stats, pid: str, col: str, sensor: str, ts: pd.Series, values: pd.S
 
 def scan_raw_csv(path: Path, expected: dict[str, set[pd.Timestamp]], date_map: dict[str, str], stats) -> None:
     sensor = sensor_name(path)
-    if sensor == "04_eyetracker" and path.name.lower() != "output.csv":
+    if sensor == "04_eyetracker":
         return
     pid = infer_pid(path, date_map)
     if not pid:
         return
     try:
         df = pd.read_csv(path, low_memory=False, on_bad_lines="skip", encoding="utf-8-sig", **csv_kwargs(path))
-    except Exception:
+    except Exception as exc:
+        print(f"WARNING: failed to read raw CSV for QC: {path} ({exc})")
         return
     if df.empty:
         return
@@ -286,12 +287,30 @@ def scan_empatica_names(expected: dict[str, set[pd.Timestamp]], date_map: dict[s
             stats[pid][clean_col("01_empatica", col)].update(present)
 
 
+def scan_eyetracker_output(expected: dict[str, set[pd.Timestamp]], stats) -> None:
+    path = OUTPUTS / INPUTS["04_eyetracker"]
+    if not path.exists():
+        print(f"WARNING: eyetracker output missing for QC: {path}")
+        return
+    df = pd.read_csv(path, low_memory=False, parse_dates=["Datetime"])
+    df["ParticipantID"] = df["ParticipantID"].astype(str)
+    for pid, g in df.groupby("ParticipantID"):
+        if pid not in expected:
+            continue
+        ts = pd.to_datetime(g["Datetime"], errors="coerce")
+        for col in g.columns:
+            if col in SKIP:
+                continue
+            add_bins(stats, pid, clean_col("04_eyetracker", col), "04_eyetracker", ts, g[col], expected)
+
+
 def raw_missing_rows(idx: pd.DataFrame, participants: list[str]) -> list[dict]:
     expected = {pid: set(g["Datetime"]) for pid, g in idx.groupby("ParticipantID")}
     from collections import defaultdict
     stats = defaultdict(lambda: defaultdict(set))
     dmap = date_to_pid()
     scan_empatica_names(expected, dmap, stats)
+    scan_eyetracker_output(expected, stats)
     for path in sorted(RAW_DATA_DIR.rglob("*")):
         if path.is_file() and path.suffix.lower() in {".csv", ".txt", ".tsv"}:
             scan_raw_csv(path, expected, dmap, stats)

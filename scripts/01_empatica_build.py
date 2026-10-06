@@ -1,22 +1,11 @@
-# Empatica build pipeline
-# Restored from 01_empatica_build - Copy.ipynb build cells.
-# Only addition: skip AVRO when full cached native/RRI intermediates are current.
-# Production mode: TARGET_PARTICIPANTS = None runs all participants.
-
 """
-Build native 10-second Empatica inputs from AVRO for the participants listed in
-TARGET_PARTICIPANTS. AVRO field extraction follows Empatica's official Python
-example, then adds study-specific batching, timestamp alignment, phase labelling,
-and 10-second aggregation.
+Build native 10-second Empatica inputs from staged AVRO files using Empatica's
+official AVRO access pattern, then apply the Paper 3 study-specific batching,
+timestamp alignment, phase labelling, and 10-second aggregation.
 
 Source reference:
 - Empatica Support, "How to access Avro files with Python"
   https://support.empatica.com/hc/en-us/articles/17405877853981-How-to-access-Avro-files-with-Python
-
-Adaptation made here:
-- The official example converts one AVRO file to raw sensor CSVs.
-- This cell processes all selected participant AVRO files, converts timestamps,
-  aligns data to study phases, and creates the native RRI table used by the HRV correction stage.
 """
 
 from avro.datafile import DataFileReader
@@ -27,9 +16,9 @@ import numpy as np
 import pandas as pd
 import neurokit2 as nk
 import warnings
-import sys
 import os
-warnings.filterwarnings('ignore')
+import sys
+warnings.filterwarnings('default')
 
 RAW_EMPA = Path(r'C:\Users\pandya\Documents\Github\docker\Paper3_Github\rawdata\01_empatica')
 SCRIPTS_DIR = Path(r'C:\Users\pandya\Documents\Github\docker\ExpData\scripts')
@@ -37,46 +26,26 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 from _paths import assert_sensor_folder_clean
 assert_sensor_folder_clean('empatica', RAW_EMPA)
+EMPATICA_FILES_DIR = Path(r'C:\Users\pandya\Documents\Github\docker\Paper3_Github\output\empatica_files')
 KEY_FILE = Path(r'C:\Users\pandya\Documents\Github\docker\Paper3_Github\output\key.csv')
 INDEX_CSV = Path(r'C:\Users\pandya\Documents\Github\docker\Paper3_Github\output\00_index_10sec.csv')
-# For quick checks: Python is zero-indexed, but slot [1] is intentionally P8 per request.
-PARTICIPANT_IDS = [None, 'P8', 'P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P9', 'P10', 'P11', 'P12', 'P13', 'P14', 'P15', 'P16', 'P17', 'P18']
-TARGET_PARTICIPANTS = None
-RRI_FILTER_APPROACH = os.environ.get('EMPATICA_RRI_FILTER_APPROACH', 'kubios_vlow045s')
-FULL_OUTPUT_INPUT_CSV = Path(r'C:\Users\pandya\Documents\Github\docker\Paper3_Github\output\01_empatica_native_input_intermediate.csv')
-FULL_RRI_NATIVE_CSV = Path(r'C:\Users\pandya\Documents\Github\docker\Paper3_Github\output\01_empatica_rri_native.csv')
-OUTPUT_SUFFIX = f"_{TARGET_PARTICIPANTS[0]}_{RRI_FILTER_APPROACH}_check" if TARGET_PARTICIPANTS else ''
-OUTPUT_INPUT_CSV = FULL_OUTPUT_INPUT_CSV.with_name(f"{FULL_OUTPUT_INPUT_CSV.stem}{OUTPUT_SUFFIX}{FULL_OUTPUT_INPUT_CSV.suffix}")
-RRI_NATIVE_CSV = FULL_RRI_NATIVE_CSV.with_name(f"{FULL_RRI_NATIVE_CSV.stem}{OUTPUT_SUFFIX}{FULL_RRI_NATIVE_CSV.suffix}")
-RESULTS_CSV = Path(r'C:\Users\pandya\Documents\Github\docker\Paper3_Github\output\01_empatica_corrected_10sec.csv').with_name(f"01_empatica_corrected_10sec{OUTPUT_SUFFIX}.csv")
-REUSE_AVRO_INTERMEDIATE = True
-MIN_INTERMEDIATE_BYTES = 1024
+FULL_OUTPUT_INPUT_CSV = EMPATICA_FILES_DIR / '01_empatica_native_input_intermediate.csv'
+FULL_RRI_NATIVE_CSV = EMPATICA_FILES_DIR / '01_empatica_rri_native.csv'
+OUTPUT_INPUT_CSV = FULL_OUTPUT_INPUT_CSV
+RRI_NATIVE_CSV = FULL_RRI_NATIVE_CSV
+RESULTS_CSV = Path(r'C:\Users\pandya\Documents\Github\docker\Paper3_Github\output\01_empatica_corrected_10sec.csv')
 PHASES = ['BikeU', 'WalkU', 'BikeG', 'WalkG', 'Tram', 'Indoor']
 KEY_TO_DATA_OFFSET_HOURS = 2
 TZ = 'Europe/Brussels'
 
+def load_key(key_file=KEY_FILE):
+    key_df = pd.read_csv(key_file)
+    key_df = key_df.dropna(subset=["Participant_ID"]).copy()
+    key_df["Participant_ID"] = key_df["Participant_ID"].astype(int)
+    return key_df.drop_duplicates("Participant_ID", keep="first").sort_values("Participant_ID").reset_index(drop=True)
 
-def _has_cached_empatica_intermediate():
-    required = [
-        (FULL_OUTPUT_INPUT_CSV, {'ParticipantID', 'PhaseID', 'Datetime'}),
-        (FULL_RRI_NATIVE_CSV, {'ParticipantID', 'peak_time', 'rri_ms'}),
-    ]
-    for path, columns in required:
-        if not path.exists() or path.stat().st_size < MIN_INTERMEDIATE_BYTES:
-            return False
-        try:
-            if not columns <= set(pd.read_csv(path, nrows=0).columns):
-                return False
-        except Exception:
-            return False
-    newest_avro = max((p.stat().st_mtime for p in RAW_EMPA.rglob('*.avro')), default=0)
-    oldest_cache = min(FULL_OUTPUT_INPUT_CSV.stat().st_mtime, FULL_RRI_NATIVE_CSV.stat().st_mtime)
-    return oldest_cache >= newest_avro
 
-key = pd.read_csv(KEY_FILE)
-key = key.dropna(subset=["Participant_ID"]).copy()
-key["Participant_ID"] = key["Participant_ID"].astype(int)
-key = key.drop_duplicates("Participant_ID", keep="first").sort_values("Participant_ID").reset_index(drop=True)
+key = load_key()
 
 
 def parse_date(d):
@@ -90,6 +59,22 @@ def _as_brussels_timestamp(value):
     return ts.tz_convert(TZ)
 
 
+def load_met_for_participant(pid, date_folder, clip_start, clip_end):
+    raw_dir = RAW_EMPA / date_folder
+    parts = []
+    for met_path in sorted(raw_dir.rglob('*_met.csv')):
+        met = pd.read_csv(met_path)
+        if {'timestamp_iso', 'met'} <= set(met.columns):
+            met['Datetime'] = pd.to_datetime(met['timestamp_iso'], utc=True, errors='coerce').dt.tz_convert(TZ).dt.tz_localize(None)
+            met['empatica__met'] = pd.to_numeric(met['met'], errors='coerce')
+            met = met.dropna(subset=['Datetime'])[['Datetime', 'empatica__met']]
+            met = met[(met['Datetime'] >= clip_start.tz_localize(None)) & (met['Datetime'] <= clip_end.tz_localize(None))]
+            parts.append(met)
+    if not parts:
+        return pd.DataFrame(columns=['Datetime', 'empatica__met'])
+    return pd.concat(parts, ignore_index=True).drop_duplicates(subset=['Datetime'], keep='first')
+
+
 def build_windows(key_df):
     windows = {}
     clip_windows = {}
@@ -97,8 +82,6 @@ def build_windows(key_df):
         if pd.isna(row.get('Participant_ID')):
             continue
         pid = f"P{int(row['Participant_ID'])}"
-        if TARGET_PARTICIPANTS is not None and pid not in TARGET_PARTICIPANTS:
-            continue
         date = parse_date(str(row['Date']))
         starts, ends = [], []
         for phase in PHASES:
@@ -142,9 +125,10 @@ def _us_to_brussels(unix_us_array):
 
 
 def read_avro_sensors(avro_path):
-    reader = DataFileReader(open(str(avro_path), 'rb'), DatumReader())
-    data = next(reader)
-    reader.close()
+    with open(str(avro_path), 'rb') as fh:
+        reader = DataFileReader(fh, DatumReader())
+        data = next(reader)
+        reader.close()
     raw = data['rawData']
     sensors = {}
     avro_version = (
@@ -153,23 +137,21 @@ def read_avro_sensors(avro_path):
         data.get('schemaVersion', {}).get('patch', 0),
     )
 
-    try:
-        a = raw['accelerometer']
+    a = raw.get('accelerometer')
+    if a:
         n = len(a['x'])
-        if n > 0:
+        sf = float(a.get('samplingFrequency', 0) or 0)
+        if n > 0 and sf > 0:
             params = a.get('imuParams', {})
-            # Empatica official AVRO-to-CSV example uses physical/digital scaling
-            # before v6.5.0 and imuParams['conversionFactor'] from v6.5.0 onward.
-            # Source: https://support.empatica.com/hc/en-us/articles/17405877853981
             if avro_version >= (6, 5, 0) and 'conversionFactor' in params:
                 scale = params['conversionFactor']
-            elif {'physicalMax', 'physicalMin', 'digitalMax', 'digitalMin'} <= set(params.keys()):
+            elif {'physicalMax', 'physicalMin', 'digitalMax', 'digitalMin'} <= set(params):
                 dp = params['physicalMax'] - params['physicalMin']
                 dd = params['digitalMax'] - params['digitalMin']
                 scale = dp / dd if dd else 1.0
             else:
                 scale = 1.0
-            us = np.round(a['timestampStart'] + np.arange(n) * (1e6 / a['samplingFrequency'])).astype(np.int64)
+            us = np.round(a['timestampStart'] + np.arange(n) * (1e6 / sf)).astype(np.int64)
             sensors['acc'] = pd.DataFrame(
                 {
                     'acc_x': np.array(a['x'], dtype=float) * scale,
@@ -178,61 +160,43 @@ def read_avro_sensors(avro_path):
                 },
                 index=_us_to_brussels(us),
             )
-    except Exception:
-        pass
+        elif n > 0:
+            print(f"[WARN] invalid AVRO accelerometer block skipped: {avro_path} (samplingFrequency={sf})")
 
-    try:
-        e = raw['eda']
+    e = raw.get('eda')
+    if e:
         n = len(e['values'])
-        if n > 0:
-            sf = float(e['samplingFrequency'])
-            vals = pd.to_numeric(pd.Series(e['values']), errors='coerce').to_numpy(dtype=float)
-            # EDA conductance is non-negative. Negative AVRO samples are treated as
-            # invalid measurements, not forced to zero, so device-floor problems remain visible.
-            vals[vals < 0] = np.nan
+        sf = float(e.get('samplingFrequency', 0) or 0)
+        if n > 0 and sf > 0:
             us = np.round(e['timestampStart'] + np.arange(n) * (1e6 / sf)).astype(np.int64)
+            vals = pd.to_numeric(pd.Series(e['values']), errors='coerce').to_numpy(dtype=float)
             sensors['eda'] = pd.DataFrame({'empatica__eda_scl_usiemens': vals}, index=_us_to_brussels(us))
-    except Exception:
-        pass
+        elif n > 0:
+            print(f"[WARN] invalid AVRO EDA block skipped: {avro_path} (samplingFrequency={sf})")
 
-    try:
-        t = raw['temperature']
+    t = raw.get('temperature')
+    if t:
         n = len(t['values'])
-        if n > 0:
-            us = np.round(t['timestampStart'] + np.arange(n) * (1e6 / t['samplingFrequency'])).astype(np.int64)
+        sf = float(t.get('samplingFrequency', 0) or 0)
+        if n > 0 and sf > 0:
+            us = np.round(t['timestampStart'] + np.arange(n) * (1e6 / sf)).astype(np.int64)
             sensors['temperature'] = pd.DataFrame({'temperature': t['values']}, index=_us_to_brussels(us))
-    except Exception:
-        pass
+        elif n > 0:
+            print(f"[WARN] invalid AVRO temperature block skipped: {avro_path} (samplingFrequency={sf})")
 
-    try:
-        peaks = raw.get('systolicPeaks', {}).get('peaksTimeNanos', [])
-        if len(peaks) >= 2:
-            peak_ts = pd.to_datetime(np.array(peaks, dtype=np.int64), unit='ns', utc=True).tz_convert(TZ)
-            sensors['peaks'] = pd.DataFrame({'peak_time': peak_ts})
-    except Exception:
-        pass
+    peaks = raw.get('systolicPeaks', {}).get('peaksTimeNanos', [])
+    if len(peaks) >= 2:
+        peak_ts = pd.to_datetime(np.array(peaks, dtype=np.int64), unit='ns', utc=True).tz_convert(TZ)
+        sensors['peaks'] = pd.DataFrame({'peak_time': peak_ts})
 
     return sensors
 
 
 phase_windows, clip_windows = build_windows(key)
 labeled_segments = build_labeled_segments(phase_windows, clip_windows)
-
-if REUSE_AVRO_INTERMEDIATE and _has_cached_empatica_intermediate():
-    print(f'Reusing cached Empatica AVRO intermediate -> {FULL_OUTPUT_INPUT_CSV}')
-    print(f'Reusing cached Empatica native RRI -> {FULL_RRI_NATIVE_CSV}')
-    all_out_df = pd.read_csv(FULL_OUTPUT_INPUT_CSV, parse_dates=['Datetime'])
-    all_rri_df = pd.read_csv(FULL_RRI_NATIVE_CSV, parse_dates=['peak_time'])
-    if TARGET_PARTICIPANTS is not None:
-        all_out_df = all_out_df[all_out_df['ParticipantID'].astype(str).isin(TARGET_PARTICIPANTS)].copy()
-        all_rri_df = all_rri_df[all_rri_df['ParticipantID'].astype(str).isin(TARGET_PARTICIPANTS)].copy()
-    all_out = [all_out_df]
-    all_rri = [all_rri_df]
-    clip_windows = {}
-else:
-    print('Building Empatica AVRO intermediate from staged AVRO files')
-    all_out = []
-    all_rri = []
+print('Building Empatica AVRO intermediate from staged AVRO files')
+all_out = []
+all_rri = []
 
 for pid in sorted(clip_windows):
     participant_row = key[key['Participant_ID'].astype('Int64') == int(pid[1:])]
@@ -240,6 +204,7 @@ for pid in sorted(clip_windows):
     raw_dir = RAW_EMPA / date_folder
     avro_files = sorted(raw_dir.rglob('*.avro'))
     clip_start, clip_end = clip_windows[pid]
+    met_df = load_met_for_participant(pid, date_folder, clip_start, clip_end)
 
     eda_parts, temp_parts, acc_parts, peak_rows = [], [], [], []
     for avro_path in avro_files:
@@ -294,6 +259,8 @@ for pid in sorted(clip_windows):
     out['PhaseID'] = 'reststop'
     if not raw10.empty:
         out = out.merge(raw10.reset_index().rename(columns={'index': 'Datetime'}), on='Datetime', how='left')
+    if not met_df.empty:
+        out = out.merge(met_df, on='Datetime', how='left')
     for seg_pid, seg_start, seg_end, phase_name in labeled_segments:
         if seg_pid != pid:
             continue
@@ -325,7 +292,7 @@ for pid in sorted(clip_windows):
     else:
         out['empatica__pulse_rate_bpm'] = np.nan
 
-    keep = ['ParticipantID', 'PhaseID', 'Datetime', 'empatica__pulse_rate_bpm', 'empatica__eda_scl_usiemens', 'eda_tonic', 'eda_phasic', 'temperature', 'acc_x', 'acc_y', 'acc_z', 'vector_magnitude']
+    keep = ['ParticipantID', 'PhaseID', 'Datetime', 'empatica__pulse_rate_bpm', 'empatica__met', 'empatica__eda_scl_usiemens', 'eda_tonic', 'eda_phasic', 'temperature', 'acc_x', 'acc_y', 'acc_z', 'vector_magnitude']
     for col in keep:
         if col not in out.columns:
             out[col] = np.nan
@@ -354,11 +321,8 @@ if INDEX_CSV.exists():
 
 OUTPUT_INPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
 all_out_df.to_csv(OUTPUT_INPUT_CSV, index=False, lineterminator='\n')
-try:
-    all_rri_df.to_csv(RRI_NATIVE_CSV, index=False, lineterminator='\n')
-    print(f'Saved native RRI input -> {RRI_NATIVE_CSV}')
-except PermissionError as exc:
-    print(f'Skipped locked native RRI CSV -> {RRI_NATIVE_CSV}: {exc}')
+all_rri_df.to_csv(RRI_NATIVE_CSV, index=False, lineterminator='\n')
+print(f'Saved native RRI input -> {RRI_NATIVE_CSV}')
 print(f'Saved native 10-sec input -> {OUTPUT_INPUT_CSV}')
 print(all_out_df['ParticipantID'].value_counts().sort_index().to_string())
 
@@ -372,17 +336,9 @@ missing values remain NaN. HRV frequency-domain metrics are computed with
 NeuroKit2's published `hrv_frequency` method on valid native RRI intervals.
 """
 
-from pathlib import Path
-import warnings
-import numpy as np
-import pandas as pd
-import neurokit2 as nk
-warnings.filterwarnings('ignore')
-
 INPUT_CSV = str(OUTPUT_INPUT_CSV)
 RRI_NATIVE_CSV = str(RRI_NATIVE_CSV)
 RESULTS_CSV = str(RESULTS_CSV)
-FINAL_RESULTS_CSV = RESULTS_CSV
 KEY_FILE = r'C:\Users\pandya\Documents\Github\docker\Paper3_Github\output\key.csv'
 
 HR_WINDOW_SECS = 60
@@ -417,6 +373,7 @@ FD_AUDIT_COLS = [
     'hrv_fd_5min_max_gap_seconds',
     'hrv_fd_5min_valid_span_seconds',
 ]
+FD_AUDIT_TIME_COLS = ['hrv_fd_5min_segment_start', 'hrv_fd_5min_segment_end']
 
 
 def filter_rri_artifacts_keep_index(rri_vals: np.ndarray, threshold: float):
@@ -449,33 +406,6 @@ def filter_rri_artifacts_keep_index(rri_vals: np.ndarray, threshold: float):
             changed = True
     return vals, original_indices
 
-
-
-def parse_key_date_local(d):
-    from datetime import datetime
-    return datetime.strptime(f"{d}-2025", "%d-%b-%Y").strftime("%Y-%m-%d")
-
-
-def build_phase_windows_from_key(key_df):
-    windows = {}
-    for _, row in key_df.iterrows():
-        if pd.isna(row.get('Participant_ID')):
-            continue
-        pid = f"P{int(row['Participant_ID'])}"
-        date_str = parse_key_date_local(str(row['Date']))
-        for phase in ['BikeU', 'WalkU', 'BikeG', 'WalkG', 'Tram']:
-            sc = f'{phase}_start'
-            ec = f'{phase}_end'
-            if pd.isna(row.get(sc)) or pd.isna(row.get(ec)):
-                continue
-            start = pd.Timestamp(f'{date_str} {row[sc]}') + pd.Timedelta(hours=2)
-            end = pd.Timestamp(f'{date_str} {row[ec]}') + pd.Timedelta(hours=2)
-            if end < start:
-                end += pd.Timedelta(days=1)
-            windows[(pid, phase)] = (start, end)
-    return windows
-
-
 def bounded_window(t_center, phase_start, phase_end, target_secs, min_secs):
     half = pd.Timedelta(seconds=target_secs / 2.0)
     start = max(phase_start, t_center - half)
@@ -483,19 +413,6 @@ def bounded_window(t_center, phase_start, phase_end, target_secs, min_secs):
     if (end - start).total_seconds() < min_secs:
         return None, None
     return start, end
-
-
-def compute_hr_for_row(t_center, peak_times, rri_ms):
-    half = pd.Timedelta(seconds=HR_WINDOW_SECS / 2.0)
-    mask = (peak_times >= t_center - half) & (peak_times < t_center + half)
-    vals = pd.to_numeric(rri_ms.loc[mask], errors='coerce').to_numpy(dtype=float)
-    vals = vals[np.isfinite(vals) & (vals >= 250) & (vals <= 2500)]
-    if len(vals) < MIN_RAW_RRI_FOR_HR:
-        return np.nan, len(vals)
-    med = np.nanmedian(vals)
-    if not np.isfinite(med) or med <= 0:
-        return np.nan, len(vals)
-    return 60000.0 / med, len(vals)
 
 
 def compute_rmssd_for_row(t_center, phase_start, phase_end, peak_times, rri_ms):
@@ -647,17 +564,13 @@ for col in FD_OUTPUT_COLS:
 for col in FD_AUDIT_COLS:
     if col == 'hrv_fd_5min_available':
         df[col] = False
+    elif col in FD_AUDIT_TIME_COLS:
+        df[col] = pd.NaT
     else:
         df[col] = np.nan
 
 missing_phase_rows = []
 coverage_rows = []
-
-phase_key_df = pd.read_csv(KEY_FILE)
-phase_key_df = phase_key_df.dropna(subset=["Participant_ID"]).copy()
-phase_key_df["Participant_ID"] = phase_key_df["Participant_ID"].astype(int)
-phase_key_df = phase_key_df.drop_duplicates("Participant_ID", keep="first").sort_values("Participant_ID").reset_index(drop=True)
-phase_windows = build_phase_windows_from_key(phase_key_df)
 
 for pid in sorted(df['ParticipantID'].astype(str).unique()):
     df_pid = df[df['ParticipantID'].astype(str) == pid].copy().sort_values('Datetime')
@@ -671,24 +584,30 @@ for pid in sorted(df['ParticipantID'].astype(str).unique()):
         else:
             phase_start = sub['Datetime'].min()
             phase_end = sub['Datetime'].max() + pd.Timedelta(seconds=10)
-        rri_seg = rri_native[(rri_native['ParticipantID'] == pid) & (rri_native['peak_time'] >= phase_start) & (rri_native['peak_time'] < phase_end)].copy()
+        phase_start_naive = pd.Timestamp(phase_start).tz_localize(None) if pd.Timestamp(phase_start).tzinfo is not None else pd.Timestamp(phase_start)
+        phase_end_naive = pd.Timestamp(phase_end).tz_localize(None) if pd.Timestamp(phase_end).tzinfo is not None else pd.Timestamp(phase_end)
+        rri_seg = rri_native[
+            (rri_native['ParticipantID'] == pid)
+            & (rri_native['peak_time'] >= phase_start_naive)
+            & (rri_native['peak_time'] < phase_end_naive)
+        ].copy()
         peak_times = pd.to_datetime(rri_seg['peak_time'])
         rri_ms = rri_seg['rri_ms']
 
         for row_i, t_center in zip(sub.index, sub['Datetime']):
             df.loc[row_i, 'hrv_td_rmssd'] = compute_rmssd_for_row(
                 t_center,
-                phase_start,
-                phase_end,
+                phase_start_naive,
+                phase_end_naive,
                 peak_times,
                 rri_ms,
             )
-            df.loc[row_i, 'hrv_td_sdnn'] = compute_sdnn_for_row(t_center, phase_start, phase_end, peak_times, rri_ms)
+            df.loc[row_i, 'hrv_td_sdnn'] = compute_sdnn_for_row(t_center, phase_start_naive, phase_end_naive, peak_times, rri_ms)
 
         if phase != 'reststop':
             has_fd = False
             for row_i, t_center in zip(sub.index, sub['Datetime']):
-                fd = compute_fd_for_row(t_center, phase_start, phase_end, peak_times, rri_ms)
+                fd = compute_fd_for_row(t_center, phase_start_naive, phase_end_naive, peak_times, rri_ms)
                 if fd is None:
                     continue
                 has_fd = True
@@ -706,8 +625,6 @@ print(f'Saved corrected Empatica output -> {RESULTS_CSV}')
 
 print(f'Row count: {len(df)}')
 _expected_df = pd.read_csv(r'C:\Users\pandya\Documents\Github\docker\Paper3_Github\output\00_index_10sec.csv', usecols=['ParticipantID'])
-if TARGET_PARTICIPANTS is not None:
-    _expected_df = _expected_df[_expected_df['ParticipantID'].astype(str).isin(TARGET_PARTICIPANTS)]
 expected_rows = len(_expected_df)
 if len(df) != expected_rows:
     raise RuntimeError(f'Expected {expected_rows} rows from 00_index_10sec.csv, found {len(df)}')
