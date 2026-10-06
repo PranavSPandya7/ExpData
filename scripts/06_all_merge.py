@@ -14,7 +14,8 @@ import pandas as pd
 from shapely import force_2d, line_locate_point
 from shapely.geometry import Point
 
-from _paths import OUTPUTS, RAW_DATA_DIR
+from _paths import OUTPUTS, RAW_DATA_DIR, setup_build_warning_log
+setup_build_warning_log(__file__)
 
 
 OUT = OUTPUTS

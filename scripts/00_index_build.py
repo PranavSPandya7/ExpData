@@ -5,7 +5,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pandas as pd
 import numpy as np
-from _paths import KEY_FILE, OUTPUTS, load_key_unique
+from _paths import KEY_FILE, OUTPUTS, load_key_unique, setup_build_warning_log
+setup_build_warning_log(__file__)
 
 OUT_FILE = OUTPUTS / '00_index_10sec.csv'
 OUT_FILE.parent.mkdir(parents=True, exist_ok=True)

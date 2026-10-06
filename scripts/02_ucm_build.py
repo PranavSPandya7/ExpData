@@ -8,7 +8,8 @@ import numpy as np
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import KEY_FILE, OUTPUTS, RAW_DATA_DIR, assert_sensor_folder_clean, load_key_unique
+from _paths import KEY_FILE, OUTPUTS, RAW_DATA_DIR, assert_sensor_folder_clean, load_key_unique, setup_build_warning_log
+setup_build_warning_log(__file__)
 
 
 def flag_bad_gps_points(df, phase):

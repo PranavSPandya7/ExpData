@@ -9,7 +9,8 @@ import pandas as pd
 
 warnings.filterwarnings("default")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import KEY_FILE, OUTPUTS, RAW_ET_DIR, assert_sensor_folder_clean, key_participant_ids
+from _paths import KEY_FILE, OUTPUTS, RAW_ET_DIR, assert_sensor_folder_clean, key_participant_ids, setup_build_warning_log
+setup_build_warning_log(__file__)
 
 STAGED_ROOT = RAW_ET_DIR
 PER_FOLDER_OUTPUT_ROOT = OUTPUTS / "04_eyetracker_output"
