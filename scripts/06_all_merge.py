@@ -23,9 +23,10 @@ INDEX_FILE = OUT / "00_index_10sec.csv"
 OUT_FILE = OUT / "mergeddata_all.csv"
 OUT_FILE_11 = OUT / "merged_all_11participants.csv"
 MERGE_KEYS = ["ParticipantID", "PhaseID", "Datetime"]
-PHASES_5 = {"BikeU", "WalkU", "BikeG", "WalkG", "Tram"}
-GPKG_DIR = RAW_DATA_DIR / "Experiment path"
-PHASE_GPKG = {p: f"{p}.gpkg" for p in PHASES_5}
+ROUTE_PHASES = {"BikeU", "WalkU", "BikeG", "WalkG", "Tram"}
+QUESTIONNAIRE_PHASES = ROUTE_PHASES | {"Indoor", "Base"}
+GPKG_DIR = Path(__file__).resolve().parents[1] / "Experiment path"
+PHASE_GPKG = {p: f"{p}.gpkg" for p in ROUTE_PHASES}
 VALID_11_PARTICIPANTS = {f"P{i}" for i in [4, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]}
 CANONICAL_INPUT_NAMES = [
     "00_index_10sec.csv",
@@ -159,8 +160,15 @@ def main() -> None:
         df = clean_sensor_columns(df, name)
         if "Datetime" not in df.columns and "questionnaires" in name:
             if "PhaseID" in df.columns:
-                df = df[df["PhaseID"].isin(PHASES_5)]
-            df = df.drop_duplicates(subset=["ParticipantID", "PhaseID"], keep="last")
+                df = df[df["PhaseID"].isin(QUESTIONNAIRE_PHASES)]
+                # The recurring form has one pre-exposure Base response but no
+                # explicit Indoor response. Use Base as the Indoor analysis
+                # anchor; preserve an explicit Indoor row if one is ever added.
+                base = df[df["PhaseID"] == "Base"].copy()
+                base["PhaseID"] = "Indoor"
+                explicit = df[df["PhaseID"] != "Base"]
+                df = pd.concat([explicit, base], ignore_index=True)
+            df = df.drop_duplicates(subset=["ParticipantID", "PhaseID"], keep="first")
             df = prefix_source_columns(df, name, {"ParticipantID", "PhaseID"})
             q_cols = [c for c in df.columns if c not in ("ParticipantID", "PhaseID")]
             merged = merged.merge(df[["ParticipantID", "PhaseID"] + q_cols], on=["ParticipantID", "PhaseID"], how="left")

@@ -24,7 +24,7 @@ ATMO_LYS_DIR  = RAW_ATMO_DIR  # Atmotube + LYS CSVs
 NEON_ROOT_DIR = RAW_ET_DIR    # Staged Neon Player exports
 QUEST_SOURCE  = RAW_QUEST_DIR # Questionnaire source CSVs
 
-PHASES_MAIN = ["BikeU", "WalkU", "BikeG", "WalkG", "Tram"]
+PHASES_MAIN = ["BikeU", "WalkU", "BikeG", "WalkG", "Tram", "Indoor"]
 _WARNING_LOG_SCRIPT = None
 
 
