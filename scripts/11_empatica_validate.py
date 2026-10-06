@@ -38,9 +38,9 @@ ONLY_PARTICIPANTS = {
 }
 DEFAULT_VISIBLE_PIDS = {f'P{p}' for p in [4, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]}
 
-PHASES = ['BikeU','WalkU','BikeG','WalkG','Tram']
-PHASE_ID = {'BikeU':'BikeU','WalkU':'WalkU','BikeG':'BikeG','WalkG':'WalkG','Tram':'Tram'}
-PHASE_COLORS = {'BikeU':'#d45500','WalkU':'#b8860b','BikeG':'#1a6b1a','WalkG':'#52b852','Tram':'#7f8c8d'}
+PHASES = ['BikeU','WalkU','BikeG','WalkG','Tram','Indoor']
+PHASE_ID = {'BikeU':'BikeU','WalkU':'WalkU','BikeG':'BikeG','WalkG':'WalkG','Tram':'Tram','Indoor':'Indoor'}
+PHASE_COLORS = {'BikeU':'#d45500','WalkU':'#b8860b','BikeG':'#1a6b1a','WalkG':'#52b852','Tram':'#7f8c8d','Indoor':'#34495e'}
 STATUS_COLOR = {'GOOD':'#27ae60','FAIR':'#e67e22','POOR':'#c0392b','NO DATA':'#7f8c8d'}
 
 SIGNAL_PLOTS = [
